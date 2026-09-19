@@ -1,16 +1,10 @@
-  import os
+import os
 import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO)
 
@@ -64,10 +58,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            search_movie
-        )
+        MessageHandler(filters.TEXT & ~filters.COMMAND, search_movie)
     )
 
     print("🤖 Bot is running...")
@@ -75,4 +66,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()  
+    main()
