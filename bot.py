@@ -19,8 +19,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TMDB_TOKEN = os.getenv("TMDB_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# Private Telegram channel invite link
-CHANNEL_INVITE_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
+# Your private Telegram channel invite link
+CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -74,41 +74,37 @@ def movie_details(movie_id):
     return tmdb_request(url)
 
 
-# ---------------------------------------------------------
-# BUTTONS
-# ---------------------------------------------------------
-
-def force_subscribe_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🔔 Force Subscribe",
-                callback_data="force_subscribe"
-            )
-        ]
-    ])
-
+# --------------------------------------------------
+# ACCESS FLOW
+# --------------------------------------------------
 
 def join_channel_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🔔 Join Channel",
-                url=CHANNEL_INVITE_LINK
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "➡️ Continue to Bot",
-                callback_data="continue_to_bot"
+                callback_data="join_channel"
             )
         ]
     ])
 
 
-# ---------------------------------------------------------
-# START
-# ---------------------------------------------------------
+def click_channel_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔔 Click Channel",
+                url=CHANNEL_LINK
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✅ Continue to Bot",
+                callback_data="continue_to_bot"
+            )
+        ]
+    ])
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -118,55 +114,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set()
     )
 
-    if user_id not in unlocked_users:
+    if user_id in unlocked_users:
         await update.message.reply_text(
-            "🔒 <b>Access Required</b>\n\n"
-            "Please subscribe to our channel to continue.",
-            reply_markup=force_subscribe_keyboard(),
-            parse_mode="HTML"
+            "🎬 Welcome back to Movie Search Bot!\n\n"
+            "Send me a movie name.\n\n"
+            "Example: Avatar"
         )
         return
 
     await update.message.reply_text(
-        "🎬 Welcome to Movie Search Bot!\n\n"
-        "Send me a movie name.\n\n"
-        "Example: Avatar"
-    )
-
-
-# ---------------------------------------------------------
-# FORCE SUBSCRIBE
-# ---------------------------------------------------------
-
-async def force_subscribe(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    query = update.callback_query
-    await query.answer()
-
-    await query.message.edit_text(
-        "🔔 <b>Join Our Channel</b>\n\n"
-        "Please tap the button below to open our private channel.\n\n"
-        "After opening the channel, return here and tap "
-        "<b>Continue to Bot</b>.",
+        "🎬 <b>Welcome to Movie Search Bot!</b>\n\n"
+        "🔒 Please join our channel to continue.\n\n"
+        "Tap the button below:",
         reply_markup=join_channel_keyboard(),
         parse_mode="HTML"
     )
 
 
-# ---------------------------------------------------------
-# CONTINUE TO BOT
-# ---------------------------------------------------------
-
-async def continue_to_bot(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def join_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user_id = query.from_user.id
+    await query.edit_message_text(
+        "🔔 <b>Join our private channel</b>\n\n"
+        "1️⃣ Click <b>Click Channel</b>\n"
+        "2️⃣ Join the private channel\n"
+        "3️⃣ Come back here\n"
+        "4️⃣ Tap <b>Continue to Bot</b>",
+        reply_markup=click_channel_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+async def continue_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
 
     unlocked_users = context.application.bot_data.setdefault(
         "unlocked_users",
@@ -175,18 +159,18 @@ async def continue_to_bot(
 
     unlocked_users.add(user_id)
 
-    await query.message.edit_text(
-        "✅ <b>Access Granted!</b>\n\n"
-        "🎬 Welcome to Movie Search Bot!\n\n"
-        "Send me a movie name.\n\n"
+    await query.edit_message_text(
+        "🎉 <b>Access Granted!</b>\n\n"
+        "✅ You can now use the Movie Search Bot.\n\n"
+        "🎬 Send me a movie name.\n\n"
         "Example: Avatar",
         parse_mode="HTML"
     )
 
 
-# ---------------------------------------------------------
+# --------------------------------------------------
 # MOVIE SEARCH
-# ---------------------------------------------------------
+# --------------------------------------------------
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -198,9 +182,8 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in unlocked_users:
         await update.message.reply_text(
-            "🔒 <b>Please subscribe to our channel first.</b>",
-            reply_markup=force_subscribe_keyboard(),
-            parse_mode="HTML"
+            "🔒 Please join the channel first.",
+            reply_markup=join_channel_keyboard()
         )
         return
 
@@ -246,18 +229,11 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ---------------------------------------------------------
-# MOVIE DETAILS
-# ---------------------------------------------------------
-
-async def select_movie(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def select_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user_id = query.from_user.id
+    user_id = update.effective_user.id
 
     unlocked_users = context.application.bot_data.setdefault(
         "unlocked_users",
@@ -266,9 +242,8 @@ async def select_movie(
 
     if user_id not in unlocked_users:
         await query.message.reply_text(
-            "🔒 <b>Please subscribe to our channel first.</b>",
-            reply_markup=force_subscribe_keyboard(),
-            parse_mode="HTML"
+            "🔒 Please join the channel first.",
+            reply_markup=join_channel_keyboard()
         )
         return
 
@@ -298,7 +273,8 @@ async def select_movie(
 
         if poster:
             poster_url = (
-                "https://image.tmdb.org/t/p/w500" + poster
+                "https://image.tmdb.org/t/p/w500"
+                + poster
             )
 
             await query.message.reply_photo(
@@ -318,9 +294,9 @@ async def select_movie(
         )
 
 
-# ---------------------------------------------------------
+# --------------------------------------------------
 # MAIN
-# ---------------------------------------------------------
+# --------------------------------------------------
 
 def main():
     if not BOT_TOKEN:
@@ -336,14 +312,16 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Start
     app.add_handler(
         CommandHandler("start", start)
     )
 
+    # Access buttons
     app.add_handler(
         CallbackQueryHandler(
-            force_subscribe,
-            pattern="^force_subscribe$"
+            join_channel,
+            pattern="^join_channel$"
         )
     )
 
@@ -354,17 +332,19 @@ def main():
         )
     )
 
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            search
-        )
-    )
-
+    # Movie buttons
     app.add_handler(
         CallbackQueryHandler(
             select_movie,
             pattern="^movie:"
+        )
+    )
+
+    # Movie search
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            search
         )
     )
 
