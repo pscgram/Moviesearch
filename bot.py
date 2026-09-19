@@ -180,8 +180,7 @@ async def start(
 
 
 # =========================================================
-# STEP 1
-# JOIN CHANNEL
+# STEP 1 - JOIN CHANNEL
 # =========================================================
 
 async def join_channel(
@@ -193,16 +192,13 @@ async def join_channel(
     await query.answer()
 
     await query.edit_message_text(
-        "🔔 <b>Join Channel</b>\n\n"
-        "Tap the button below.",
-        reply_markup=click_channel_keyboard(),
-        parse_mode="HTML"
+        "🔔",
+        reply_markup=click_channel_keyboard()
     )
 
 
 # =========================================================
-# STEP 2
-# CLICK CHANNEL
+# STEP 2 - CLICK CHANNEL
 # =========================================================
 
 async def click_channel(
@@ -215,24 +211,20 @@ async def click_channel(
 
     # Show ONLY the private channel button
     await query.edit_message_text(
-        "🔔 <b>Open Private Channel</b>\n\n"
-        "Tap the button below to open the channel.\n\n"
-        "⏳ <b>Continue will appear after 15 seconds.</b>",
-        reply_markup=open_channel_keyboard(),
-        parse_mode="HTML"
+        "🔔",
+        reply_markup=open_channel_keyboard()
     )
 
     # Wait 15 seconds
     await asyncio.sleep(15)
 
-    # Replace the channel button with Continue
+    # After 15 seconds, replace it with
+    # ONLY the Continue button
     try:
 
         await query.edit_message_text(
-            "✅ <b>You can continue now.</b>\n\n"
-            "Tap the button below.",
-            reply_markup=continue_keyboard(),
-            parse_mode="HTML"
+            "✅",
+            reply_markup=continue_keyboard()
         )
 
     except Exception:
@@ -240,8 +232,7 @@ async def click_channel(
 
 
 # =========================================================
-# STEP 3
-# CONTINUE TO BOT
+# STEP 3 - CONTINUE TO BOT
 # =========================================================
 
 async def continue_to_bot(
