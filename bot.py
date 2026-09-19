@@ -19,9 +19,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TMDB_TOKEN = os.getenv("TMDB_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# Your private Telegram channel invite link
 CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 
+
+# =========================
+# HEALTH SERVER
+# =========================
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -36,6 +39,10 @@ class HealthHandler(BaseHTTPRequestHandler):
 def web_server():
     HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
 
+
+# =========================
+# TMDB
+# =========================
 
 def tmdb_request(url):
     req = urllib.request.Request(
@@ -74,39 +81,49 @@ def movie_details(movie_id):
     return tmdb_request(url)
 
 
-# --------------------------------------------------
-# ACCESS FLOW
-# --------------------------------------------------
+# =========================
+# ACCESS BUTTONS
+# =========================
 
-def join_channel_keyboard():
+def join_channel_button():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🔔 Join Channel",
-                callback_data="join_channel"
+                callback_data="stage_join"
             )
         ]
     ])
 
 
-def click_channel_keyboard():
+def click_channel_button():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🔔 Click Channel",
-                url=CHANNEL_LINK
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "✅ Continue to Bot",
-                callback_data="continue_to_bot"
+                callback_data="stage_click"
             )
         ]
     ])
 
 
+def continue_button():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ Continue to Bot",
+                callback_data="stage_continue"
+            )
+        ]
+    ])
+
+
+# =========================
+# START
+# =========================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     user_id = update.effective_user.id
 
     unlocked_users = context.application.bot_data.setdefault(
@@ -116,37 +133,78 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id in unlocked_users:
         await update.message.reply_text(
-            "🎬 Welcome back to Movie Search Bot!\n\n"
+            "🎬 <b>Welcome back!</b>\n\n"
             "Send me a movie name.\n\n"
-            "Example: Avatar"
+            "Example: Avatar",
+            parse_mode="HTML"
         )
         return
 
     await update.message.reply_text(
         "🎬 <b>Welcome to Movie Search Bot!</b>\n\n"
-        "🔒 Please join our channel to continue.\n\n"
-        "Tap the button below:",
-        reply_markup=join_channel_keyboard(),
+        "🔒 Join our channel to continue.",
+        reply_markup=join_channel_button(),
         parse_mode="HTML"
     )
 
 
-async def join_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================
+# STEP 1
+# JOIN CHANNEL
+# =========================
+
+async def stage_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
     await query.answer()
 
     await query.edit_message_text(
-        "🔔 <b>Join our private channel</b>\n\n"
-        "1️⃣ Click <b>Click Channel</b>\n"
-        "2️⃣ Join the private channel\n"
-        "3️⃣ Come back here\n"
-        "4️⃣ Tap <b>Continue to Bot</b>",
-        reply_markup=click_channel_keyboard(),
+        "🔔 <b>Join Channel</b>\n\n"
+        "Tap the button below to continue.",
+        reply_markup=click_channel_button(),
         parse_mode="HTML"
     )
 
 
-async def continue_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================
+# STEP 2
+# CLICK CHANNEL
+# =========================
+
+async def stage_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    # Open the private channel link automatically
+    # by answering with a URL is not possible.
+    # Instead, edit the same message and show
+    # the actual channel link as the ONLY button.
+
+    await query.edit_message_text(
+        "🔔 <b>Click Channel</b>\n\n"
+        "Tap below to open the private channel.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔔 Open Private Channel",
+                    url=CHANNEL_LINK
+                )
+            ]
+        ]),
+        parse_mode="HTML"
+    )
+
+    # Continue button is intentionally NOT shown here.
+
+
+# =========================
+# STEP 3
+# CONTINUE
+# =========================
+
+async def stage_continue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
     await query.answer()
 
@@ -161,18 +219,18 @@ async def continue_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         "🎉 <b>Access Granted!</b>\n\n"
-        "✅ You can now use the Movie Search Bot.\n\n"
-        "🎬 Send me a movie name.\n\n"
-        "Example: Avatar",
+        "✅ You can now use the bot.\n\n"
+        "🎬 Send me a movie name.",
         parse_mode="HTML"
     )
 
 
-# --------------------------------------------------
+# =========================
 # MOVIE SEARCH
-# --------------------------------------------------
+# =========================
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     user_id = update.effective_user.id
 
     unlocked_users = context.application.bot_data.setdefault(
@@ -181,10 +239,12 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if user_id not in unlocked_users:
+
         await update.message.reply_text(
             "🔒 Please join the channel first.",
-            reply_markup=join_channel_keyboard()
+            reply_markup=join_channel_button()
         )
+
         return
 
     name = update.message.text.strip()
@@ -194,18 +254,23 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
+
         data = search_movies(name)
         movies = data.get("results", [])[:8]
 
         if not movies:
-            await msg.edit_text("❌ No movies found.")
+            await msg.edit_text(
+                "❌ No movies found."
+            )
             return
 
         buttons = []
 
         for movie in movies:
+
             movie_id = movie.get("id")
             title = movie.get("title", "Unknown")
+
             date = movie.get("release_date", "")
             year = date[:4] if date else "N/A"
 
@@ -224,12 +289,19 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except Exception:
+
         await msg.edit_text(
-            "⚠️ Search failed.\nPlease try again."
+            "⚠️ Search failed.\n"
+            "Please try again."
         )
 
 
+# =========================
+# MOVIE DETAILS
+# =========================
+
 async def select_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
     await query.answer()
 
@@ -241,25 +313,32 @@ async def select_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if user_id not in unlocked_users:
+
         await query.message.reply_text(
             "🔒 Please join the channel first.",
-            reply_markup=join_channel_keyboard()
+            reply_markup=join_channel_button()
         )
+
         return
 
     movie_id = query.data.split(":")[1]
 
     try:
+
         movie = movie_details(movie_id)
 
         title = movie.get("title", "Unknown")
+
         date = movie.get("release_date", "")
         year = date[:4] if date else "N/A"
+
         rating = movie.get("vote_average", 0)
+
         overview = movie.get(
             "overview",
             "No description available."
         )
+
         poster = movie.get("poster_path")
 
         text = (
@@ -272,6 +351,7 @@ async def select_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if poster:
+
             poster_url = (
                 "https://image.tmdb.org/t/p/w500"
                 + poster
@@ -282,23 +362,27 @@ async def select_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=text,
                 parse_mode="HTML"
             )
+
         else:
+
             await query.message.reply_text(
                 text,
                 parse_mode="HTML"
             )
 
     except Exception:
+
         await query.message.reply_text(
             "⚠️ Couldn't load movie details."
         )
 
 
-# --------------------------------------------------
+# =========================
 # MAIN
-# --------------------------------------------------
+# =========================
 
 def main():
+
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing")
 
@@ -312,27 +396,34 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Start
+    # START
     app.add_handler(
         CommandHandler("start", start)
     )
 
-    # Access buttons
+    # ACCESS FLOW
     app.add_handler(
         CallbackQueryHandler(
-            join_channel,
-            pattern="^join_channel$"
+            stage_join,
+            pattern="^stage_join$"
         )
     )
 
     app.add_handler(
         CallbackQueryHandler(
-            continue_to_bot,
-            pattern="^continue_to_bot$"
+            stage_click,
+            pattern="^stage_click$"
         )
     )
 
-    # Movie buttons
+    app.add_handler(
+        CallbackQueryHandler(
+            stage_continue,
+            pattern="^stage_continue$"
+        )
+    )
+
+    # MOVIE BUTTON
     app.add_handler(
         CallbackQueryHandler(
             select_movie,
@@ -340,7 +431,7 @@ def main():
         )
     )
 
-    # Movie search
+    # TEXT SEARCH
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
