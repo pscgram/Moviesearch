@@ -19,6 +19,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TMDB_TOKEN = os.getenv("TMDB_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
+# Private Telegram channel
+CHANNEL_ID = -1004290623496
+
+# Private channel invite link
+CHANNEL_INVITE_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
+
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -71,7 +77,78 @@ def movie_details(movie_id):
     return tmdb_request(url)
 
 
+async def is_subscribed(user_id, context):
+    try:
+        member = await context.bot.get_chat_member(
+            chat_id=CHANNEL_ID,
+            user_id=user_id
+        )
+
+        return member.status in (
+            "member",
+            "administrator",
+            "creator"
+        )
+
+    except Exception as e:
+        print("Membership check error:", e)
+        return False
+
+
+def subscription_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔔 Join Channel",
+                url=CHANNEL_INVITE_LINK
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✅ Verify Subscription",
+                callback_data="verify_subscription"
+            )
+        ]
+    ])
+
+
+async def show_subscription_message(update, context):
+    text = (
+        "🔒 <b>Channel Subscription Required</b>\n\n"
+        "Please join our private channel first.\n\n"
+        "After joining, press <b>Verify Subscription</b> below."
+    )
+
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            text,
+            reply_markup=subscription_keyboard(),
+            parse_mode="HTML"
+        )
+    elif update.message:
+        await update.message.reply_text(
+            text,
+            reply_markup=subscription_keyboard(),
+            parse_mode="HTML"
+        )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    subscribed = await is_subscribed(user_id, context)
+
+    if not subscribed:
+        await update.message.reply_text(
+            "🔒 <b>Join our channel to use this bot.</b>\n\n"
+            "1️⃣ Tap <b>Join Channel</b>\n"
+            "2️⃣ Join the channel\n"
+            "3️⃣ Come back and tap <b>Verify Subscription</b>",
+            reply_markup=subscription_keyboard(),
+            parse_mode="HTML"
+        )
+        return
+
     await update.message.reply_text(
         "🎬 Welcome to Movie Search Bot!\n\n"
         "Send me a movie name.\n\n"
@@ -79,7 +156,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def verify_subscription(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    subscribed = await is_subscribed(user_id, context)
+
+    if subscribed:
+        await query.message.edit_text(
+            "✅ <b>Subscription Verified!</b>\n\n"
+            "🎬 You can now search for movies.\n\n"
+            "Send me a movie name.\n"
+            "Example: Avatar",
+            parse_mode="HTML"
+        )
+    else:
+        await query.answer(
+            "❌ You haven't joined the channel yet.",
+            show_alert=True
+        )
+
+
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    subscribed = await is_subscribed(user_id, context)
+
+    if not subscribed:
+        await show_subscription_message(update, context)
+        return
+
     name = update.message.text.strip()
 
     msg = await update.message.reply_text(
@@ -122,9 +234,26 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def select_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def select_movie(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     query = update.callback_query
+
     await query.answer()
+
+    user_id = query.from_user.id
+
+    # Check membership again before showing movie details
+    subscribed = await is_subscribed(user_id, context)
+
+    if not subscribed:
+        await query.message.reply_text(
+            "🔒 <b>Please join our channel first.</b>",
+            reply_markup=subscription_keyboard(),
+            parse_mode="HTML"
+        )
+        return
 
     movie_id = query.data.split(":")[1]
 
@@ -135,7 +264,10 @@ async def select_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date = movie.get("release_date", "")
         year = date[:4] if date else "N/A"
         rating = movie.get("vote_average", 0)
-        overview = movie.get("overview", "No description available.")
+        overview = movie.get(
+            "overview",
+            "No description available."
+        )
         poster = movie.get("poster_path")
 
         text = (
@@ -148,7 +280,9 @@ async def select_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if poster:
-            poster_url = "https://image.tmdb.org/t/p/w500" + poster
+            poster_url = (
+                "https://image.tmdb.org/t/p/w500" + poster
+            )
 
             await query.message.reply_photo(
                 photo=poster_url,
@@ -183,6 +317,13 @@ def main():
 
     app.add_handler(
         CommandHandler("start", start)
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            verify_subscription,
+            pattern="^verify_subscription$"
+        )
     )
 
     app.add_handler(
