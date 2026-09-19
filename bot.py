@@ -1,11 +1,10 @@
 import os
 import json
-import re
-import sqlite3
 import urllib.parse
 import urllib.request
 import threading
 import asyncio
+import sqlite3
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,22 +22,22 @@ TMDB_TOKEN = os.getenv("TMDB_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
 # =========================================================
-# CHANNELS
+# CHANNEL SETTINGS
 # =========================================================
 
-# Existing access/private channel
+# Existing access channel
 CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 
-# New Movie Database Channel
+# Movie Database Channel
 DATABASE_CHANNEL_ID = -1004463648734
 
+# Local movie index
+DB_FILE = "movie_files.db"
+
 
 # =========================================================
-# DATABASE
+# SQLITE DATABASE
 # =========================================================
-
-DB_FILE = "movies.db"
-
 
 def init_database():
 
@@ -47,11 +46,11 @@ def init_database():
     cursor = conn.cursor()
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS movies (
-            tmdb_id INTEGER PRIMARY KEY,
-            title TEXT NOT NULL,
-            year TEXT,
-            channel_message_id INTEGER NOT NULL
+        CREATE TABLE IF NOT EXISTS movie_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL,
+            filename_lower TEXT NOT NULL,
+            message_id INTEGER NOT NULL UNIQUE
         )
     """)
 
@@ -59,52 +58,49 @@ def init_database():
     conn.close()
 
 
-def save_movie(
-    tmdb_id,
-    title,
-    year,
-    channel_message_id
-):
+def save_movie_file(filename, message_id):
 
     conn = sqlite3.connect(DB_FILE)
 
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT OR REPLACE INTO movies
-        (tmdb_id, title, year, channel_message_id)
-        VALUES (?, ?, ?, ?)
+        INSERT OR REPLACE INTO movie_files
+        (filename, filename_lower, message_id)
+        VALUES (?, ?, ?)
     """, (
-        tmdb_id,
-        title,
-        year,
-        channel_message_id
+        filename,
+        filename.lower(),
+        message_id
     ))
 
     conn.commit()
     conn.close()
 
 
-def get_movie_message_id(tmdb_id):
+def find_movie_files(search_text):
+
+    search_text = search_text.strip().lower()
 
     conn = sqlite3.connect(DB_FILE)
 
     cursor = conn.cursor()
 
+    # Filename must START with the user's search text
     cursor.execute("""
-        SELECT channel_message_id
-        FROM movies
-        WHERE tmdb_id = ?
-    """, (tmdb_id,))
+        SELECT filename, message_id
+        FROM movie_files
+        WHERE filename_lower LIKE ?
+        ORDER BY filename_lower ASC
+    """, (
+        search_text + "%",
+    ))
 
-    result = cursor.fetchone()
+    results = cursor.fetchall()
 
     conn.close()
 
-    if result:
-        return result[0]
-
-    return None
+    return results
 
 
 # =========================================================
@@ -185,261 +181,6 @@ def movie_details(movie_id):
 
 
 # =========================================================
-# CLEAN MOVIE FILE NAME
-# =========================================================
-
-def clean_movie_filename(filename):
-
-    # Remove extension
-    name = re.sub(
-        r"\.(mp4|mkv|avi|mov|webm|m4v)$",
-        "",
-        filename,
-        flags=re.IGNORECASE
-    )
-
-    # Replace separators with spaces
-    name = re.sub(
-        r"[._]+",
-        " ",
-        name
-    )
-
-    # Remove common release/quality information
-    remove_words = [
-        r"\b2160p\b",
-        r"\b4k\b",
-        r"\b1080p\b",
-        r"\b720p\b",
-        r"\b480p\b",
-        r"\b360p\b",
-        r"\bWEB[- ]?DL\b",
-        r"\bWEBRip\b",
-        r"\bBluRay\b",
-        r"\bBRRip\b",
-        r"\bHDRip\b",
-        r"\bHDTV\b",
-        r"\bDVDRip\b",
-        r"\bHEVC\b",
-        r"\bx264\b",
-        r"\bx265\b",
-        r"\bH264\b",
-        r"\bH265\b",
-        r"\bAAC\b",
-        r"\bDDP\b",
-        r"\bDD5\.1\b",
-        r"\b5\.1\b",
-        r"\b10bit\b",
-        r"\b8bit\b",
-        r"\bEnglish\b",
-        r"\bMalayalam\b",
-        r"\bTamil\b",
-        r"\bTelugu\b",
-        r"\bHindi\b",
-        r"\bKorean\b",
-        r"\bJapanese\b",
-        r"\bDual Audio\b",
-        r"\bMulti Audio\b",
-    ]
-
-    for word in remove_words:
-
-        name = re.sub(
-            word,
-            "",
-            name,
-            flags=re.IGNORECASE
-        )
-
-    # Extract year if present
-    year_match = re.search(
-        r"\b(19|20)\d{2}\b",
-        name
-    )
-
-    year = ""
-
-    if year_match:
-        year = year_match.group(0)
-
-        # Remove year from search title
-        name = re.sub(
-            r"\b(19|20)\d{2}\b",
-            "",
-            name
-        )
-
-    # Remove brackets
-    name = re.sub(
-        r"[\[\]\(\)\{\}]",
-        " ",
-        name
-    )
-
-    # Clean multiple spaces
-    name = re.sub(
-        r"\s+",
-        " ",
-        name
-    ).strip()
-
-    return name, year
-
-
-# =========================================================
-# AUTOMATIC DATABASE CHANNEL PROCESSOR
-# =========================================================
-
-async def database_channel_movie(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    message = update.channel_post
-
-    if not message:
-        return
-
-    # Make sure this is our Movie Database Channel
-    if message.chat_id != DATABASE_CHANNEL_ID:
-        return
-
-    filename = None
-
-    # Video file
-    if message.video:
-
-        filename = message.video.file_name
-
-    # Document file
-    elif message.document:
-
-        filename = message.document.file_name
-
-    else:
-
-        return
-
-    if not filename:
-
-        await context.bot.send_message(
-            chat_id=DATABASE_CHANNEL_ID,
-            text=(
-                "⚠️ Could not identify this movie.\n\n"
-                "Please use a filename containing the movie title."
-            )
-        )
-
-        return
-
-    movie_name, file_year = clean_movie_filename(
-        filename
-    )
-
-    if not movie_name:
-
-        return
-
-    try:
-
-        data = search_movies(movie_name)
-
-        movies = data.get(
-            "results",
-            []
-        )
-
-        if not movies:
-
-            await context.bot.send_message(
-                chat_id=DATABASE_CHANNEL_ID,
-                text=(
-                    "⚠️ Movie not found on TMDB.\n\n"
-                    f"📁 File: {filename}\n"
-                    f"🔎 Search: {movie_name}"
-                )
-            )
-
-            return
-
-        selected_movie = None
-
-        # First try matching the year
-        if file_year:
-
-            for movie in movies:
-
-                release_date = movie.get(
-                    "release_date",
-                    ""
-                )
-
-                if release_date.startswith(
-                    file_year
-                ):
-
-                    selected_movie = movie
-                    break
-
-        # If no year match, use first result
-        if not selected_movie:
-
-            selected_movie = movies[0]
-
-        tmdb_id = selected_movie.get("id")
-
-        title = selected_movie.get(
-            "title",
-            movie_name
-        )
-
-        release_date = selected_movie.get(
-            "release_date",
-            ""
-        )
-
-        year = (
-            release_date[:4]
-            if release_date
-            else file_year
-        )
-
-        save_movie(
-            tmdb_id,
-            title,
-            year,
-            message.message_id
-        )
-
-        await context.bot.send_message(
-            chat_id=DATABASE_CHANNEL_ID,
-            text=(
-                "✅ <b>Movie Added</b>\n\n"
-                f"🎬 <b>{title}</b>\n"
-                f"📅 Year: <b>{year or 'N/A'}</b>\n"
-                f"🆔 TMDB ID: <b>{tmdb_id}</b>\n"
-                f"📌 Message ID: <b>{message.message_id}</b>"
-            ),
-            parse_mode="HTML"
-        )
-
-    except Exception as error:
-
-        print(
-            "Database channel error:",
-            error
-        )
-
-        await context.bot.send_message(
-            chat_id=DATABASE_CHANNEL_ID,
-            text=(
-                "⚠️ Could not add this movie.\n\n"
-                "Please check the filename and try again."
-            )
-        )
-
-
-# =========================================================
 # ACCESS BUTTONS
 # =========================================================
 
@@ -486,22 +227,6 @@ def continue_keyboard():
             InlineKeyboardButton(
                 "✅ Continue to Bot",
                 callback_data="continue_to_bot"
-            )
-        ]
-    ])
-
-
-# =========================================================
-# MOVIE FILE BUTTON
-# =========================================================
-
-def movie_file_keyboard(tmdb_id):
-
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "▶️ Watch / Get Movie",
-                callback_data=f"getmovie:{tmdb_id}"
             )
         ]
     ])
@@ -593,7 +318,7 @@ async def click_channel(
 
 
 # =========================================================
-# STEP 3 - CONTINUE TO BOT
+# STEP 3 - CONTINUE
 # =========================================================
 
 async def continue_to_bot(
@@ -624,6 +349,68 @@ async def continue_to_bot(
 
 
 # =========================================================
+# INDEX MOVIE FILES FROM DATABASE CHANNEL
+# =========================================================
+
+async def index_database_file(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    message = update.channel_post
+
+    if not message:
+        return
+
+    if message.chat_id != DATABASE_CHANNEL_ID:
+        return
+
+    filename = None
+
+    # Video
+    if message.video:
+
+        filename = message.video.file_name
+
+    # Document
+    elif message.document:
+
+        filename = message.document.file_name
+
+    if not filename:
+        return
+
+    try:
+
+        save_movie_file(
+            filename,
+            message.message_id
+        )
+
+        print(
+            f"Movie indexed: {filename} "
+            f"(message {message.message_id})"
+        )
+
+        # Optional confirmation in database channel
+        await context.bot.send_message(
+            chat_id=DATABASE_CHANNEL_ID,
+            text=(
+                "✅ <b>File Added To Movie Database</b>\n\n"
+                f"🎬 {filename}"
+            ),
+            parse_mode="HTML"
+        )
+
+    except Exception as error:
+
+        print(
+            "Database indexing error:",
+            error
+        )
+
+
+# =========================================================
 # MOVIE SEARCH
 # =========================================================
 
@@ -650,283 +437,53 @@ async def search(
 
     name = update.message.text.strip()
 
-    msg = await update.message.reply_text(
-        "🔎 Searching for:\n\n🎬 " + name
-    )
+    # -----------------------------------------------------
+    # FIRST: CHECK MOVIE DATABASE BY FILENAME
+    # -----------------------------------------------------
 
-    try:
+    matching_files = find_movie_files(name)
 
-        data = search_movies(name)
+    if matching_files:
 
-        movies = data.get(
-            "results",
-            []
-        )[:8]
+        await update.message.reply_text(
+            f"🎬 <b>{len(matching_files)} file(s) found</b>\n\n"
+            f"🔎 Search: <b>{name}</b>\n\n"
+            "📤 Sending movie files...",
+            parse_mode="HTML"
+        )
 
-        if not movies:
+        for filename, message_id in matching_files:
 
-            await msg.edit_text(
-                "❌ No movies found."
-            )
+            try:
 
-            return
-
-        buttons = []
-
-        for movie in movies:
-
-            movie_id = movie.get("id")
-
-            title = movie.get(
-                "title",
-                "Unknown"
-            )
-
-            date = movie.get(
-                "release_date",
-                ""
-            )
-
-            year = (
-                date[:4]
-                if date
-                else "N/A"
-            )
-
-            buttons.append([
-                InlineKeyboardButton(
-                    f"🎬 {title} ({year})",
-                    callback_data=f"movie:{movie_id}"
+                await context.bot.copy_message(
+                    chat_id=user_id,
+                    from_chat_id=DATABASE_CHANNEL_ID,
+                    message_id=message_id
                 )
-            ])
 
-        await msg.edit_text(
-            "🎬 <b>Search Results</b>\n\n"
-            "Choose a movie:",
-            reply_markup=InlineKeyboardMarkup(
-                buttons
-            ),
-            parse_mode="HTML"
-        )
+                # Small delay to avoid sending everything at once
+                await asyncio.sleep(0.5)
 
-    except Exception as error:
+            except Exception as error:
 
-        print(
-            "Search error:",
-            error
-        )
-
-        await msg.edit_text(
-            "⚠️ Search failed.\n"
-            "Please try again."
-        )
-
-
-# =========================================================
-# MOVIE DETAILS
-# =========================================================
-
-async def select_movie(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    user_id = update.effective_user.id
-
-    unlocked_users = context.application.bot_data.setdefault(
-        "unlocked_users",
-        set()
-    )
-
-    if user_id not in unlocked_users:
-
-        await query.message.reply_text(
-            "🔒 Please join the channel first.",
-            reply_markup=join_channel_keyboard()
-        )
+                print(
+                    f"Could not send {filename}:",
+                    error
+                )
 
         return
 
-    movie_id = int(
-        query.data.split(":")[1]
+    # -----------------------------------------------------
+    # NO FILE FOUND
+    # -----------------------------------------------------
+
+    await update.message.reply_text(
+        "❌ <b>Movie Not Available</b>\n\n"
+        f"🔎 <b>{name}</b> is not available "
+        "in our movie database.",
+        parse_mode="HTML"
     )
-
-    try:
-
-        movie = movie_details(
-            movie_id
-        )
-
-        title = movie.get(
-            "title",
-            "Unknown"
-        )
-
-        date = movie.get(
-            "release_date",
-            ""
-        )
-
-        year = (
-            date[:4]
-            if date
-            else "N/A"
-        )
-
-        rating = movie.get(
-            "vote_average",
-            0
-        )
-
-        overview = movie.get(
-            "overview",
-            "No description available."
-        )
-
-        poster = movie.get(
-            "poster_path"
-        )
-
-        # Check our Movie Database
-        channel_message_id = get_movie_message_id(
-            movie_id
-        )
-
-        if channel_message_id:
-
-            availability_text = (
-                "\n\n"
-                "✅ <b>Movie Available</b>"
-            )
-
-            keyboard = movie_file_keyboard(
-                movie_id
-            )
-
-        else:
-
-            availability_text = (
-                "\n\n"
-                "❌ <b>Movie Not Available</b>"
-            )
-
-            keyboard = None
-
-        text = (
-            f"🎬 <b>{title}</b>\n\n"
-            f"📅 Year: <b>{year}</b>\n"
-            f"⭐ Rating: <b>{rating:.1f}/10</b>\n\n"
-            f"📝 {overview}"
-            f"{availability_text}\n\n"
-            "This product uses the TMDB API but is not "
-            "endorsed or certified by TMDB."
-        )
-
-        if poster:
-
-            poster_url = (
-                "https://image.tmdb.org/t/p/w500"
-                + poster
-            )
-
-            await query.message.reply_photo(
-                photo=poster_url,
-                caption=text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
-
-        else:
-
-            await query.message.reply_text(
-                text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
-
-    except Exception as error:
-
-        print(
-            "Movie details error:",
-            error
-        )
-
-        await query.message.reply_text(
-            "⚠️ Couldn't load movie details."
-        )
-
-
-# =========================================================
-# SEND MOVIE FILE
-# =========================================================
-
-async def get_movie(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer(
-        "Preparing movie..."
-    )
-
-    user_id = update.effective_user.id
-
-    unlocked_users = context.application.bot_data.setdefault(
-        "unlocked_users",
-        set()
-    )
-
-    if user_id not in unlocked_users:
-
-        await query.message.reply_text(
-            "🔒 Please join the channel first.",
-            reply_markup=join_channel_keyboard()
-        )
-
-        return
-
-    movie_id = int(
-        query.data.split(":")[1]
-    )
-
-    channel_message_id = get_movie_message_id(
-        movie_id
-    )
-
-    if not channel_message_id:
-
-        await query.message.reply_text(
-            "❌ <b>Movie Not Available</b>",
-            parse_mode="HTML"
-        )
-
-        return
-
-    try:
-
-        await context.bot.copy_message(
-            chat_id=user_id,
-            from_chat_id=DATABASE_CHANNEL_ID,
-            message_id=channel_message_id
-        )
-
-    except Exception as error:
-
-        print(
-            "File delivery error:",
-            error
-        )
-
-        await query.message.reply_text(
-            "⚠️ Unable to send the movie file right now.\n"
-            "Please try again later."
-        )
 
 
 # =========================================================
@@ -947,10 +504,10 @@ def main():
             "TMDB_TOKEN is missing"
         )
 
-    # Initialize SQLite database
+    # Create database
     init_database()
 
-    # Start Render health server
+    # Render health server
     threading.Thread(
         target=web_server,
         daemon=True
@@ -975,7 +532,7 @@ def main():
     )
 
     # =====================================================
-    # JOIN CHANNEL
+    # ACCESS FLOW
     # =====================================================
 
     app.add_handler(
@@ -985,20 +542,12 @@ def main():
         )
     )
 
-    # =====================================================
-    # CLICK CHANNEL
-    # =====================================================
-
     app.add_handler(
         CallbackQueryHandler(
             click_channel,
             pattern="^click_channel$"
         )
     )
-
-    # =====================================================
-    # CONTINUE
-    # =====================================================
 
     app.add_handler(
         CallbackQueryHandler(
@@ -1008,29 +557,7 @@ def main():
     )
 
     # =====================================================
-    # GET MOVIE FILE
-    # =====================================================
-
-    app.add_handler(
-        CallbackQueryHandler(
-            get_movie,
-            pattern="^getmovie:"
-        )
-    )
-
-    # =====================================================
-    # MOVIE DETAILS
-    # =====================================================
-
-    app.add_handler(
-        CallbackQueryHandler(
-            select_movie,
-            pattern="^movie:"
-        )
-    )
-
-    # =====================================================
-    # MOVIE DATABASE CHANNEL
+    # DATABASE CHANNEL
     # =====================================================
 
     app.add_handler(
@@ -1043,12 +570,12 @@ def main():
                 filters.VIDEO
                 | filters.Document.ALL
             ),
-            database_channel_movie
+            index_database_file
         )
     )
 
     # =====================================================
-    # MOVIE SEARCH
+    # USER TEXT SEARCH
     # =====================================================
 
     app.add_handler(
