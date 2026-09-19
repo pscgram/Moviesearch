@@ -19,10 +19,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TMDB_TOKEN = os.getenv("TMDB_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# Private Telegram channel
-CHANNEL_ID = -1004290623496
-
-# Private channel invite link
+# Private Telegram channel invite link
 CHANNEL_INVITE_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 
 
@@ -77,25 +74,18 @@ def movie_details(movie_id):
     return tmdb_request(url)
 
 
-async def is_subscribed(user_id, context):
-    try:
-        member = await context.bot.get_chat_member(
-            chat_id=CHANNEL_ID,
-            user_id=user_id
-        )
-
-        return member.status in (
-            "member",
-            "administrator",
-            "creator"
-        )
-
-    except Exception as e:
-        print("Membership check error:", e)
-        return False
+def force_subscribe_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔔 Force Subscribe",
+                callback_data="force_subscribe"
+            )
+        ]
+    ])
 
 
-def subscription_keyboard():
+def channel_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -105,46 +95,27 @@ def subscription_keyboard():
         ],
         [
             InlineKeyboardButton(
-                "✅ Verify Subscription",
-                callback_data="verify_subscription"
+                "✅ Continue to Bot",
+                callback_data="continue_to_bot"
             )
         ]
     ])
 
 
-async def show_subscription_message(update, context):
-    text = (
-        "🔒 <b>Channel Subscription Required</b>\n\n"
-        "Please join our private channel first.\n\n"
-        "After joining, press <b>Verify Subscription</b> below."
-    )
-
-    if update.callback_query:
-        await update.callback_query.message.reply_text(
-            text,
-            reply_markup=subscription_keyboard(),
-            parse_mode="HTML"
-        )
-    elif update.message:
-        await update.message.reply_text(
-            text,
-            reply_markup=subscription_keyboard(),
-            parse_mode="HTML"
-        )
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    subscribed = await is_subscribed(user_id, context)
+    # Check whether this user has already unlocked the bot
+    unlocked_users = context.application.bot_data.setdefault(
+        "unlocked_users",
+        set()
+    )
 
-    if not subscribed:
+    if user_id not in unlocked_users:
         await update.message.reply_text(
-            "🔒 <b>Join our channel to use this bot.</b>\n\n"
-            "1️⃣ Tap <b>Join Channel</b>\n"
-            "2️⃣ Join the channel\n"
-            "3️⃣ Come back and tap <b>Verify Subscription</b>",
-            reply_markup=subscription_keyboard(),
+            "🔒 <b>Access Required</b>\n\n"
+            "Please subscribe to our channel to continue.",
+            reply_markup=force_subscribe_keyboard(),
             parse_mode="HTML"
         )
         return
@@ -156,40 +127,62 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def verify_subscription(
+async def force_subscribe(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
     query = update.callback_query
+    await query.answer()
 
+    await query.message.edit_text(
+        "🔔 <b>Subscribe to our channel</b>\n\n"
+        "1️⃣ Tap <b>Join Channel</b>\n"
+        "2️⃣ Join the private channel\n"
+        "3️⃣ Return here and tap <b>Continue to Bot</b>",
+        reply_markup=channel_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+async def continue_to_bot(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
     await query.answer()
 
     user_id = query.from_user.id
 
-    subscribed = await is_subscribed(user_id, context)
+    unlocked_users = context.application.bot_data.setdefault(
+        "unlocked_users",
+        set()
+    )
 
-    if subscribed:
-        await query.message.edit_text(
-            "✅ <b>Subscription Verified!</b>\n\n"
-            "🎬 You can now search for movies.\n\n"
-            "Send me a movie name.\n"
-            "Example: Avatar",
-            parse_mode="HTML"
-        )
-    else:
-        await query.answer(
-            "❌ You haven't joined the channel yet.",
-            show_alert=True
-        )
+    unlocked_users.add(user_id)
+
+    await query.message.edit_text(
+        "✅ <b>Access Granted!</b>\n\n"
+        "🎬 Welcome to Movie Search Bot!\n\n"
+        "Send me a movie name.\n\n"
+        "Example: Avatar",
+        parse_mode="HTML"
+    )
 
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    subscribed = await is_subscribed(user_id, context)
+    unlocked_users = context.application.bot_data.setdefault(
+        "unlocked_users",
+        set()
+    )
 
-    if not subscribed:
-        await show_subscription_message(update, context)
+    if user_id not in unlocked_users:
+        await update.message.reply_text(
+            "🔒 <b>Please subscribe to our channel first.</b>",
+            reply_markup=force_subscribe_keyboard(),
+            parse_mode="HTML"
+        )
         return
 
     name = update.message.text.strip()
@@ -239,18 +232,19 @@ async def select_movie(
     context: ContextTypes.DEFAULT_TYPE
 ):
     query = update.callback_query
-
     await query.answer()
 
     user_id = query.from_user.id
 
-    # Check membership again before showing movie details
-    subscribed = await is_subscribed(user_id, context)
+    unlocked_users = context.application.bot_data.setdefault(
+        "unlocked_users",
+        set()
+    )
 
-    if not subscribed:
+    if user_id not in unlocked_users:
         await query.message.reply_text(
-            "🔒 <b>Please join our channel first.</b>",
-            reply_markup=subscription_keyboard(),
+            "🔒 <b>Please subscribe to our channel first.</b>",
+            reply_markup=force_subscribe_keyboard(),
             parse_mode="HTML"
         )
         return
@@ -321,8 +315,15 @@ def main():
 
     app.add_handler(
         CallbackQueryHandler(
-            verify_subscription,
-            pattern="^verify_subscription$"
+            force_subscribe,
+            pattern="^force_subscribe$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            continue_to_bot,
+            pattern="^continue_to_bot$"
         )
     )
 
