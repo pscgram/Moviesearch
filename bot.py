@@ -74,6 +74,10 @@ def movie_details(movie_id):
     return tmdb_request(url)
 
 
+# ---------------------------------------------------------
+# BUTTONS
+# ---------------------------------------------------------
+
 def force_subscribe_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -85,7 +89,7 @@ def force_subscribe_keyboard():
     ])
 
 
-def channel_keyboard():
+def join_channel_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -95,17 +99,20 @@ def channel_keyboard():
         ],
         [
             InlineKeyboardButton(
-                "✅ Continue to Bot",
+                "➡️ Continue to Bot",
                 callback_data="continue_to_bot"
             )
         ]
     ])
 
 
+# ---------------------------------------------------------
+# START
+# ---------------------------------------------------------
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    # Check whether this user has already unlocked the bot
     unlocked_users = context.application.bot_data.setdefault(
         "unlocked_users",
         set()
@@ -127,6 +134,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ---------------------------------------------------------
+# FORCE SUBSCRIBE
+# ---------------------------------------------------------
+
 async def force_subscribe(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -135,14 +146,18 @@ async def force_subscribe(
     await query.answer()
 
     await query.message.edit_text(
-        "🔔 <b>Subscribe to our channel</b>\n\n"
-        "1️⃣ Tap <b>Join Channel</b>\n"
-        "2️⃣ Join the private channel\n"
-        "3️⃣ Return here and tap <b>Continue to Bot</b>",
-        reply_markup=channel_keyboard(),
+        "🔔 <b>Join Our Channel</b>\n\n"
+        "Please tap the button below to open our private channel.\n\n"
+        "After opening the channel, return here and tap "
+        "<b>Continue to Bot</b>.",
+        reply_markup=join_channel_keyboard(),
         parse_mode="HTML"
     )
 
+
+# ---------------------------------------------------------
+# CONTINUE TO BOT
+# ---------------------------------------------------------
 
 async def continue_to_bot(
     update: Update,
@@ -168,6 +183,10 @@ async def continue_to_bot(
         parse_mode="HTML"
     )
 
+
+# ---------------------------------------------------------
+# MOVIE SEARCH
+# ---------------------------------------------------------
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -226,6 +245,10 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Search failed.\nPlease try again."
         )
 
+
+# ---------------------------------------------------------
+# MOVIE DETAILS
+# ---------------------------------------------------------
 
 async def select_movie(
     update: Update,
@@ -294,6 +317,10 @@ async def select_movie(
             "⚠️ Couldn't load movie details."
         )
 
+
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
 
 def main():
     if not BOT_TOKEN:
