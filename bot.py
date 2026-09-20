@@ -25,11 +25,21 @@ PORT = int(os.getenv("PORT", "10000"))
 # CHANNEL SETTINGS
 # =========================================================
 
+# Existing access channel
 CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 
+# Movie Database Channel
 DATABASE_CHANNEL_ID = -1004463648734
 
+# Local movie index
 DB_FILE = "movie_files.db"
+
+# =========================================================
+# USER REQUEST LIMIT
+# =========================================================
+
+# Each user can make 1 movie request every 2 minutes
+REQUEST_COOLDOWN = 120
 
 
 # =========================================================
@@ -83,6 +93,7 @@ def find_movie_files(search_text):
 
     cursor = conn.cursor()
 
+    # Filename must START with user's search text
     cursor.execute("""
         SELECT filename, message_id
         FROM movie_files
@@ -300,6 +311,7 @@ async def click_channel(
         reply_markup=open_channel_keyboard()
     )
 
+    # Wait 15 seconds
     await asyncio.sleep(15)
 
     try:
@@ -345,7 +357,7 @@ async def continue_to_bot(
 
 
 # =========================================================
-# INDEX MOVIE FILES
+# INDEX MOVIE FILES FROM DATABASE CHANNEL
 # =========================================================
 
 async def index_database_file(
@@ -363,10 +375,12 @@ async def index_database_file(
 
     filename = None
 
+    # Video
     if message.video:
 
         filename = message.video.file_name
 
+    # Document
     elif message.document:
 
         filename = message.document.file_name
@@ -410,6 +424,10 @@ async def search(
         set()
     )
 
+    # =====================================================
+    # ACCESS CHECK
+    # =====================================================
+
     if user_id not in unlocked_users:
 
         await update.message.reply_text(
@@ -419,9 +437,81 @@ async def search(
 
         return
 
+    # =====================================================
+    # 2-MINUTE USER REQUEST LIMIT
+    # =====================================================
+
+    request_times = context.application.bot_data.setdefault(
+        "request_times",
+        {}
+    )
+
+    now = asyncio.get_running_loop().time()
+
+    last_request = request_times.get(user_id)
+
+    if last_request is not None:
+
+        elapsed = now - last_request
+
+        if elapsed < REQUEST_COOLDOWN:
+
+            remaining = int(
+                REQUEST_COOLDOWN - elapsed
+            )
+
+            minutes = remaining // 60
+            seconds = remaining % 60
+
+            if minutes > 0:
+
+                wait_text = (
+                    f"{minutes} minute(s) "
+                    f"{seconds} second(s)"
+                )
+
+            else:
+
+                wait_text = f"{seconds} second(s)"
+
+            await update.message.reply_text(
+                "⏳ <b>Please wait.</b>\n\n"
+                "You can make another movie request "
+                f"in <b>{wait_text}</b>.",
+                parse_mode="HTML"
+            )
+
+            return
+
+    # =====================================================
+    # START COOLDOWN
+    # =====================================================
+
+    request_times[user_id] = now
+
+    # =====================================================
+    # MOVIE NAME
+    # =====================================================
+
     name = update.message.text.strip()
 
+    if not name:
+
+        await update.message.reply_text(
+            "❌ Please enter a movie name."
+        )
+
+        return
+
+    # =====================================================
+    # SEARCH DATABASE
+    # =====================================================
+
     matching_files = find_movie_files(name)
+
+    # =====================================================
+    # FILES FOUND
+    # =====================================================
 
     if matching_files:
 
@@ -442,6 +532,7 @@ async def search(
                     message_id=message_id
                 )
 
+                # Small delay to reduce Telegram rate-limit risk
                 await asyncio.sleep(0.3)
 
             except Exception as error:
@@ -452,6 +543,10 @@ async def search(
                 )
 
         return
+
+    # =====================================================
+    # MOVIE NOT AVAILABLE
+    # =====================================================
 
     await update.message.reply_text(
         "❌ <b>Movie Not Available</b>\n\n"
@@ -467,6 +562,10 @@ async def search(
 
 def main():
 
+    # =====================================================
+    # CHECK ENVIRONMENT VARIABLES
+    # =====================================================
+
     if not BOT_TOKEN:
 
         raise ValueError(
@@ -479,12 +578,24 @@ def main():
             "TMDB_TOKEN is missing"
         )
 
+    # =====================================================
+    # INITIALIZE DATABASE
+    # =====================================================
+
     init_database()
+
+    # =====================================================
+    # RENDER HEALTH SERVER
+    # =====================================================
 
     threading.Thread(
         target=web_server,
         daemon=True
     ).start()
+
+    # =====================================================
+    # TELEGRAM APPLICATION
+    # =====================================================
 
     app = (
         Application
@@ -494,7 +605,10 @@ def main():
         .build()
     )
 
+    # =====================================================
     # START
+    # =====================================================
+
     app.add_handler(
         CommandHandler(
             "start",
@@ -502,7 +616,10 @@ def main():
         )
     )
 
+    # =====================================================
     # ACCESS FLOW
+    # =====================================================
+
     app.add_handler(
         CallbackQueryHandler(
             join_channel,
@@ -524,7 +641,10 @@ def main():
         )
     )
 
+    # =====================================================
     # DATABASE CHANNEL
+    # =====================================================
+
     app.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POST
@@ -539,7 +659,10 @@ def main():
         )
     )
 
-    # USER SEARCH
+    # =====================================================
+    # USER MOVIE SEARCH
+    # =====================================================
+
     app.add_handler(
         MessageHandler(
             filters.TEXT
@@ -548,16 +671,23 @@ def main():
         )
     )
 
+    # =====================================================
+    # START BOT
+    # =====================================================
+
     print(
         "🤖 Bot is running!"
     )
 
-    # IMPORTANT:
-    # Clear the old backlog of Telegram updates once.
     app.run_polling(
         drop_pending_updates=True
     )
 
 
+# =========================================================
+# RUN
+# =========================================================
+
 if __name__ == "__main__":
+
     main()
