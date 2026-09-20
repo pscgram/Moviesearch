@@ -17,13 +17,13 @@ from telegram.ext import (
     filters,
 )
 
+# =========================================================
+# SETTINGS
+# =========================================================
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TMDB_TOKEN = os.getenv("TMDB_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
-
-# =========================================================
-# CHANNEL SETTINGS
-# =========================================================
 
 # Existing access channel
 CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
@@ -31,15 +31,27 @@ CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 # Movie Database Channel
 DATABASE_CHANNEL_ID = -1004463648734
 
-# Local movie index
+# SQLite database
 DB_FILE = "movie_files.db"
 
 # =========================================================
 # USER REQUEST LIMIT
 # =========================================================
 
-# Each user can make 1 movie request every 2 minutes
+# One movie request every 2 minutes per user
 REQUEST_COOLDOWN = 120
+
+# =========================================================
+# INDEXING SETTINGS
+# =========================================================
+
+# Number of background SQLite workers
+INDEX_WORKERS = 4
+
+# Maximum files waiting in the indexing queue
+INDEX_QUEUE_SIZE = 5000
+
+movie_index_queue = None
 
 
 # =========================================================
@@ -48,84 +60,217 @@ REQUEST_COOLDOWN = 120
 
 def init_database():
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(
+        DB_FILE,
+        timeout=30
+    )
 
-    cursor = conn.cursor()
+    try:
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS movie_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
-            filename_lower TEXT NOT NULL,
-            message_id INTEGER NOT NULL UNIQUE
+        cursor = conn.cursor()
+
+        # Allow readers while database is being written
+        cursor.execute(
+            "PRAGMA journal_mode=WAL"
         )
-    """)
 
-    conn.commit()
-    conn.close()
+        cursor.execute(
+            "PRAGMA busy_timeout=30000"
+        )
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS movie_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                filename_lower TEXT NOT NULL,
+                message_id INTEGER NOT NULL UNIQUE
+            )
+        """)
+
+        # Fast filename search
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_filename_lower
+            ON movie_files(filename_lower)
+        """)
+
+        conn.commit()
+
+    finally:
+
+        conn.close()
+
+
+# =========================================================
+# SAVE MOVIE FILE
+# =========================================================
 
 def save_movie_file(filename, message_id):
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(
+        DB_FILE,
+        timeout=30
+    )
 
-    cursor = conn.cursor()
+    try:
 
-    cursor.execute("""
-        INSERT OR REPLACE INTO movie_files
-        (filename, filename_lower, message_id)
-        VALUES (?, ?, ?)
-    """, (
-        filename,
-        filename.lower(),
-        message_id
-    ))
+        conn.execute(
+            "PRAGMA busy_timeout=30000"
+        )
 
-    conn.commit()
-    conn.close()
+        conn.execute("""
+            INSERT OR REPLACE INTO movie_files
+            (
+                filename,
+                filename_lower,
+                message_id
+            )
+            VALUES (?, ?, ?)
+        """, (
+            filename,
+            filename.lower(),
+            message_id
+        ))
 
+        conn.commit()
+
+    finally:
+
+        conn.close()
+
+
+# =========================================================
+# SEARCH MOVIE FILES
+# =========================================================
 
 def find_movie_files(search_text):
 
     search_text = search_text.strip().lower()
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(
+        DB_FILE,
+        timeout=30
+    )
 
-    cursor = conn.cursor()
+    try:
 
-    # Filename must START with user's search text
-    cursor.execute("""
-        SELECT filename, message_id
-        FROM movie_files
-        WHERE filename_lower LIKE ?
-        ORDER BY filename_lower ASC
-    """, (
-        search_text + "%",
-    ))
+        conn.execute(
+            "PRAGMA busy_timeout=30000"
+        )
 
-    results = cursor.fetchall()
+        cursor = conn.cursor()
 
-    conn.close()
+        # Filename MUST start with search text
+        cursor.execute("""
+            SELECT filename, message_id
+            FROM movie_files
+            WHERE filename_lower LIKE ?
+            ORDER BY filename_lower ASC
+        """, (
+            search_text + "%",
+        ))
 
-    return results
+        return cursor.fetchall()
+
+    finally:
+
+        conn.close()
 
 
 # =========================================================
-# HEALTH SERVER
+# BACKGROUND INDEX WORKER
 # =========================================================
 
-class HealthHandler(BaseHTTPRequestHandler):
+async def movie_index_worker(worker_id):
+
+    print(
+        f"🗃️ Index worker {worker_id} started"
+    )
+
+    while True:
+
+        filename, message_id = (
+            await movie_index_queue.get()
+        )
+
+        try:
+
+            # SQLite runs outside Telegram event loop
+            await asyncio.to_thread(
+                save_movie_file,
+                filename,
+                message_id
+            )
+
+            print(
+                f"✅ Worker {worker_id}: "
+                f"{filename} indexed "
+                f"(message {message_id})"
+            )
+
+        except Exception as error:
+
+            print(
+                f"❌ Worker {worker_id} error:",
+                error
+            )
+
+        finally:
+
+            movie_index_queue.task_done()
+
+
+# =========================================================
+# START INDEX WORKERS
+# =========================================================
+
+async def start_index_workers(
+    application: Application
+):
+
+    global movie_index_queue
+
+    movie_index_queue = asyncio.Queue(
+        maxsize=INDEX_QUEUE_SIZE
+    )
+
+    for worker_id in range(
+        1,
+        INDEX_WORKERS + 1
+    ):
+
+        application.create_task(
+            movie_index_worker(worker_id)
+        )
+
+    print(
+        f"🚀 {INDEX_WORKERS} movie index workers started"
+    )
+
+
+# =========================================================
+# RENDER HEALTH SERVER
+# =========================================================
+
+class HealthHandler(
+    BaseHTTPRequestHandler
+):
 
     def do_GET(self):
 
         self.send_response(200)
+
         self.end_headers()
 
         self.wfile.write(
             b"Bot is running!"
         )
 
-    def log_message(self, format, *args):
+    def log_message(
+        self,
+        format,
+        *args
+    ):
+
         pass
 
 
@@ -146,8 +291,10 @@ def tmdb_request(url):
     req = urllib.request.Request(
         url,
         headers={
-            "Authorization": "Bearer " + TMDB_TOKEN,
-            "accept": "application/json"
+            "Authorization":
+                "Bearer " + TMDB_TOKEN,
+            "accept":
+                "application/json"
         }
     )
 
@@ -250,9 +397,11 @@ async def start(
 
     user_id = update.effective_user.id
 
-    unlocked_users = context.application.bot_data.setdefault(
-        "unlocked_users",
-        set()
+    unlocked_users = (
+        context.application.bot_data.setdefault(
+            "unlocked_users",
+            set()
+        )
     )
 
     if user_id in unlocked_users:
@@ -275,7 +424,7 @@ async def start(
 
 
 # =========================================================
-# STEP 1 - JOIN CHANNEL
+# STEP 1
 # =========================================================
 
 async def join_channel(
@@ -294,7 +443,7 @@ async def join_channel(
 
 
 # =========================================================
-# STEP 2 - CLICK CHANNEL
+# STEP 2
 # =========================================================
 
 async def click_channel(
@@ -322,11 +471,12 @@ async def click_channel(
         )
 
     except Exception:
+
         pass
 
 
 # =========================================================
-# STEP 3 - CONTINUE
+# STEP 3
 # =========================================================
 
 async def continue_to_bot(
@@ -340,9 +490,11 @@ async def continue_to_bot(
 
     user_id = update.effective_user.id
 
-    unlocked_users = context.application.bot_data.setdefault(
-        "unlocked_users",
-        set()
+    unlocked_users = (
+        context.application.bot_data.setdefault(
+            "unlocked_users",
+            set()
+        )
     )
 
     unlocked_users.add(user_id)
@@ -357,7 +509,7 @@ async def continue_to_bot(
 
 
 # =========================================================
-# INDEX MOVIE FILES FROM DATABASE CHANNEL
+# DATABASE CHANNEL
 # =========================================================
 
 async def index_database_file(
@@ -375,35 +527,42 @@ async def index_database_file(
 
     filename = None
 
-    # Video
+    # Video file
     if message.video:
 
         filename = message.video.file_name
 
-    # Document
+    # Document file
     elif message.document:
 
         filename = message.document.file_name
 
     if not filename:
+
         return
 
     try:
 
-        save_movie_file(
-            filename,
-            message.message_id
+        # IMPORTANT:
+        # Do NOT write to SQLite here.
+        # Just queue the file.
+
+        await movie_index_queue.put(
+            (
+                filename,
+                message.message_id
+            )
         )
 
         print(
-            f"Movie indexed: {filename} "
+            f"📥 Queued: {filename} "
             f"(message {message.message_id})"
         )
 
     except Exception as error:
 
         print(
-            "Database indexing error:",
+            "❌ Queue error:",
             error
         )
 
@@ -419,9 +578,11 @@ async def search(
 
     user_id = update.effective_user.id
 
-    unlocked_users = context.application.bot_data.setdefault(
-        "unlocked_users",
-        set()
+    unlocked_users = (
+        context.application.bot_data.setdefault(
+            "unlocked_users",
+            set()
+        )
     )
 
     # =====================================================
@@ -438,17 +599,21 @@ async def search(
         return
 
     # =====================================================
-    # 2-MINUTE USER REQUEST LIMIT
+    # REQUEST LIMIT
     # =====================================================
 
-    request_times = context.application.bot_data.setdefault(
-        "request_times",
-        {}
+    request_times = (
+        context.application.bot_data.setdefault(
+            "request_times",
+            {}
+        )
     )
 
     now = asyncio.get_running_loop().time()
 
-    last_request = request_times.get(user_id)
+    last_request = request_times.get(
+        user_id
+    )
 
     if last_request is not None:
 
@@ -461,6 +626,7 @@ async def search(
             )
 
             minutes = remaining // 60
+
             seconds = remaining % 60
 
             if minutes > 0:
@@ -472,12 +638,15 @@ async def search(
 
             else:
 
-                wait_text = f"{seconds} second(s)"
+                wait_text = (
+                    f"{seconds} second(s)"
+                )
 
             await update.message.reply_text(
                 "⏳ <b>Please wait.</b>\n\n"
-                "You can make another movie request "
-                f"in <b>{wait_text}</b>.",
+                "You can make another movie "
+                "request in "
+                f"<b>{wait_text}</b>.",
                 parse_mode="HTML"
             )
 
@@ -504,10 +673,31 @@ async def search(
         return
 
     # =====================================================
-    # SEARCH DATABASE
+    # DATABASE SEARCH
     # =====================================================
 
-    matching_files = find_movie_files(name)
+    try:
+
+        matching_files = (
+            await asyncio.to_thread(
+                find_movie_files,
+                name
+            )
+        )
+
+    except Exception as error:
+
+        print(
+            "❌ Search database error:",
+            error
+        )
+
+        await update.message.reply_text(
+            "⚠️ Database temporarily busy.\n\n"
+            "Please try again later."
+        )
+
+        return
 
     # =====================================================
     # FILES FOUND
@@ -516,7 +706,8 @@ async def search(
     if matching_files:
 
         await update.message.reply_text(
-            f"🎬 <b>{len(matching_files)} file(s) found</b>\n\n"
+            f"🎬 <b>{len(matching_files)} "
+            f"file(s) found</b>\n\n"
             f"🔎 Search: <b>{name}</b>\n\n"
             "📤 Sending movie files...",
             parse_mode="HTML"
@@ -532,20 +723,21 @@ async def search(
                     message_id=message_id
                 )
 
-                # Small delay to reduce Telegram rate-limit risk
+                # Protect against Telegram flooding
                 await asyncio.sleep(0.3)
 
             except Exception as error:
 
                 print(
-                    f"Could not send {filename}:",
+                    f"❌ Could not send "
+                    f"{filename}:",
                     error
                 )
 
         return
 
     # =====================================================
-    # MOVIE NOT AVAILABLE
+    # NOT AVAILABLE
     # =====================================================
 
     await update.message.reply_text(
@@ -563,7 +755,7 @@ async def search(
 def main():
 
     # =====================================================
-    # CHECK ENVIRONMENT VARIABLES
+    # ENVIRONMENT
     # =====================================================
 
     if not BOT_TOKEN:
@@ -579,7 +771,7 @@ def main():
         )
 
     # =====================================================
-    # INITIALIZE DATABASE
+    # DATABASE
     # =====================================================
 
     init_database()
@@ -602,11 +794,12 @@ def main():
         .builder()
         .token(BOT_TOKEN)
         .concurrent_updates(16)
+        .post_init(start_index_workers)
         .build()
     )
 
     # =====================================================
-    # START
+    # START COMMAND
     # =====================================================
 
     app.add_handler(
@@ -642,7 +835,7 @@ def main():
     )
 
     # =====================================================
-    # DATABASE CHANNEL
+    # MOVIE DATABASE CHANNEL
     # =====================================================
 
     app.add_handler(
@@ -660,7 +853,7 @@ def main():
     )
 
     # =====================================================
-    # USER MOVIE SEARCH
+    # USER SEARCH
     # =====================================================
 
     app.add_handler(
@@ -672,7 +865,7 @@ def main():
     )
 
     # =====================================================
-    # START BOT
+    # START
     # =====================================================
 
     print(
@@ -680,7 +873,7 @@ def main():
     )
 
     app.run_polling(
-        drop_pending_updates=True
+        drop_pending_updates=False
     )
 
 
