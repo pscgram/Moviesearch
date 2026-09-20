@@ -4,10 +4,19 @@ import urllib.parse
 import urllib.request
 import threading
 import asyncio
-import sqlite3
+import re
+
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from pymongo import MongoClient, ASCENDING
+from pymongo.errors import PyMongoError
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -17,22 +26,42 @@ from telegram.ext import (
     filters,
 )
 
+
 # =========================================================
 # SETTINGS
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TMDB_TOKEN = os.getenv("TMDB_TOKEN")
+MONGODB_URI = os.getenv("MONGODB_URI")
+
 PORT = int(os.getenv("PORT", "10000"))
 
-# Existing access channel
+
+# =========================================================
+# EXISTING ACCESS CHANNEL
+# =========================================================
+
 CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 
-# Movie Database Channel
+
+# =========================================================
+# MOVIE DATABASE CHANNEL
+# =========================================================
+
 DATABASE_CHANNEL_ID = -1004463648734
 
-# SQLite database
-DB_FILE = "movie_files.db"
+
+# =========================================================
+# MONGODB SETTINGS
+# =========================================================
+
+MONGODB_DATABASE = "pscgram"
+MONGODB_COLLECTION = "movie_files"
+
+mongo_client = None
+movie_collection = None
+
 
 # =========================================================
 # USER REQUEST LIMIT
@@ -41,149 +70,190 @@ DB_FILE = "movie_files.db"
 # One movie request every 2 minutes per user
 REQUEST_COOLDOWN = 120
 
+
 # =========================================================
 # INDEXING SETTINGS
 # =========================================================
 
-# Number of background SQLite workers
+# Number of background MongoDB workers
 INDEX_WORKERS = 4
 
-# Maximum files waiting in the indexing queue
+# Maximum files waiting in memory
 INDEX_QUEUE_SIZE = 5000
 
 movie_index_queue = None
 
 
 # =========================================================
-# SQLITE DATABASE
+# MONGODB INITIALIZATION
 # =========================================================
 
 def init_database():
 
-    conn = sqlite3.connect(
-        DB_FILE,
-        timeout=30
+    global mongo_client
+    global movie_collection
+
+    if not MONGODB_URI:
+
+        raise ValueError(
+            "MONGODB_URI is missing"
+        )
+
+    print("🔌 Connecting to MongoDB...")
+
+    mongo_client = MongoClient(
+        MONGODB_URI,
+
+        # Connection settings
+        serverSelectionTimeoutMS=10000,
+        connectTimeoutMS=10000,
+        socketTimeoutMS=30000,
+
+        # Keep connection pool healthy
+        maxPoolSize=20,
+        minPoolSize=1,
+
+        retryWrites=True
     )
 
-    try:
+    # Test connection
+    mongo_client.admin.command("ping")
 
-        cursor = conn.cursor()
+    print("✅ MongoDB connection successful")
 
-        # Allow readers while database is being written
-        cursor.execute(
-            "PRAGMA journal_mode=WAL"
-        )
+    database = mongo_client[MONGODB_DATABASE]
 
-        cursor.execute(
-            "PRAGMA busy_timeout=30000"
-        )
+    movie_collection = database[MONGODB_COLLECTION]
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS movie_files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename TEXT NOT NULL,
-                filename_lower TEXT NOT NULL,
-                message_id INTEGER NOT NULL UNIQUE
-            )
-        """)
+    # Create unique index on Telegram message ID
+    movie_collection.create_index(
+        [
+            ("message_id", ASCENDING)
+        ],
+        unique=True
+    )
 
-        # Fast filename search
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_filename_lower
-            ON movie_files(filename_lower)
-        """)
+    # Create index for fast filename searching
+    movie_collection.create_index(
+        [
+            ("filename_lower", ASCENDING)
+        ]
+    )
 
-        conn.commit()
-
-    finally:
-
-        conn.close()
+    print(
+        "✅ MongoDB indexes ready"
+    )
 
 
 # =========================================================
 # SAVE MOVIE FILE
 # =========================================================
 
-def save_movie_file(filename, message_id):
+def save_movie_file(
+    filename,
+    message_id
+):
 
-    conn = sqlite3.connect(
-        DB_FILE,
-        timeout=30
-    )
+    if movie_collection is None:
 
-    try:
-
-        conn.execute(
-            "PRAGMA busy_timeout=30000"
+        raise RuntimeError(
+            "MongoDB is not initialized"
         )
 
-        conn.execute("""
-            INSERT OR REPLACE INTO movie_files
-            (
-                filename,
-                filename_lower,
-                message_id
-            )
-            VALUES (?, ?, ?)
-        """, (
-            filename,
-            filename.lower(),
-            message_id
-        ))
+    filename_lower = filename.strip().lower()
 
-        conn.commit()
+    movie_collection.update_one(
 
-    finally:
+        {
+            "message_id": message_id
+        },
 
-        conn.close()
+        {
+            "$set": {
+                "filename": filename,
+                "filename_lower": filename_lower,
+                "message_id": message_id
+            }
+        },
+
+        upsert=True
+    )
 
 
 # =========================================================
 # SEARCH MOVIE FILES
 # =========================================================
 
-def find_movie_files(search_text):
+def find_movie_files(
+    search_text
+):
 
-    search_text = search_text.strip().lower()
+    if movie_collection is None:
 
-    conn = sqlite3.connect(
-        DB_FILE,
-        timeout=30
-    )
-
-    try:
-
-        conn.execute(
-            "PRAGMA busy_timeout=30000"
+        raise RuntimeError(
+            "MongoDB is not initialized"
         )
 
-        cursor = conn.cursor()
+    search_text = (
+        search_text
+        .strip()
+        .lower()
+    )
 
-        # Filename MUST start with search text
-        cursor.execute("""
-            SELECT filename, message_id
-            FROM movie_files
-            WHERE filename_lower LIKE ?
-            ORDER BY filename_lower ASC
-        """, (
-            search_text + "%",
-        ))
+    if not search_text:
 
-        return cursor.fetchall()
+        return []
 
-    finally:
+    # Escape special regex characters
+    escaped_text = re.escape(
+        search_text
+    )
 
-        conn.close()
+    # Filename MUST START with search text
+    regex_pattern = "^" + escaped_text
+
+    cursor = movie_collection.find(
+        {
+            "filename_lower": {
+                "$regex": regex_pattern
+            }
+        },
+
+        {
+            "_id": 0,
+            "filename": 1,
+            "message_id": 1
+        }
+    ).sort(
+        "filename_lower",
+        ASCENDING
+    )
+
+    results = []
+
+    for document in cursor:
+
+        results.append(
+            (
+                document["filename"],
+                document["message_id"]
+            )
+        )
+
+    return results
 
 
 # =========================================================
 # BACKGROUND INDEX WORKER
 # =========================================================
 
-async def movie_index_worker(worker_id):
+async def movie_index_worker(
+    worker_id
+):
 
     print(
-        f"🗃️ Index worker {worker_id} started"
+        f"🗃️ MongoDB index worker "
+        f"{worker_id} started"
     )
 
     while True:
@@ -194,7 +264,8 @@ async def movie_index_worker(worker_id):
 
         try:
 
-            # SQLite runs outside Telegram event loop
+            # MongoDB operation runs outside
+            # the Telegram event loop
             await asyncio.to_thread(
                 save_movie_file,
                 filename,
@@ -210,8 +281,8 @@ async def movie_index_worker(worker_id):
         except Exception as error:
 
             print(
-                f"❌ Worker {worker_id} error:",
-                error
+                f"❌ Worker {worker_id} "
+                f"indexing error: {error}"
             )
 
         finally:
@@ -239,11 +310,14 @@ async def start_index_workers(
     ):
 
         application.create_task(
-            movie_index_worker(worker_id)
+            movie_index_worker(
+                worker_id
+            )
         )
 
     print(
-        f"🚀 {INDEX_WORKERS} movie index workers started"
+        f"🚀 {INDEX_WORKERS} MongoDB "
+        f"index workers started"
     )
 
 
@@ -258,6 +332,11 @@ class HealthHandler(
     def do_GET(self):
 
         self.send_response(200)
+
+        self.send_header(
+            "Content-Type",
+            "text/plain"
+        )
 
         self.end_headers()
 
@@ -276,10 +355,20 @@ class HealthHandler(
 
 def web_server():
 
-    HTTPServer(
-        ("0.0.0.0", PORT),
+    server = HTTPServer(
+        (
+            "0.0.0.0",
+            PORT
+        ),
         HealthHandler
-    ).serve_forever()
+    )
+
+    print(
+        f"🌐 Health server running "
+        f"on port {PORT}"
+    )
+
+    server.serve_forever()
 
 
 # =========================================================
@@ -289,10 +378,13 @@ def web_server():
 def tmdb_request(url):
 
     req = urllib.request.Request(
+
         url,
+
         headers={
             "Authorization":
                 "Bearer " + TMDB_TOKEN,
+
             "accept":
                 "application/json"
         }
@@ -304,34 +396,44 @@ def tmdb_request(url):
     ) as response:
 
         return json.loads(
-            response.read().decode()
+            response
+            .read()
+            .decode()
         )
 
 
 def search_movies(name):
 
-    query = urllib.parse.quote(name)
+    query = urllib.parse.quote(
+        name
+    )
 
     url = (
-        "https://api.themoviedb.org/3/search/movie"
+        "https://api.themoviedb.org/3/"
+        "search/movie"
         "?query=" + query +
         "&include_adult=false"
         "&language=en-US"
         "&page=1"
     )
 
-    return tmdb_request(url)
+    return tmdb_request(
+        url
+    )
 
 
 def movie_details(movie_id):
 
     url = (
-        "https://api.themoviedb.org/3/movie/"
+        "https://api.themoviedb.org/3/"
+        "movie/"
         + str(movie_id)
         + "?language=en-US"
     )
 
-    return tmdb_request(url)
+    return tmdb_request(
+        url
+    )
 
 
 # =========================================================
@@ -341,48 +443,56 @@ def movie_details(movie_id):
 def join_channel_keyboard():
 
     return InlineKeyboardMarkup([
+
         [
             InlineKeyboardButton(
                 "🔔 Join Channel",
                 callback_data="join_channel"
             )
         ]
+
     ])
 
 
 def click_channel_keyboard():
 
     return InlineKeyboardMarkup([
+
         [
             InlineKeyboardButton(
                 "🔔 Click Channel",
                 callback_data="click_channel"
             )
         ]
+
     ])
 
 
 def open_channel_keyboard():
 
     return InlineKeyboardMarkup([
+
         [
             InlineKeyboardButton(
                 "🔗 Open Private Channel",
                 url=CHANNEL_LINK
             )
         ]
+
     ])
 
 
 def continue_keyboard():
 
     return InlineKeyboardMarkup([
+
         [
             InlineKeyboardButton(
                 "✅ Continue to Bot",
                 callback_data="continue_to_bot"
             )
         ]
+
     ])
 
 
@@ -395,10 +505,13 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user_id = update.effective_user.id
+    user_id = (
+        update.effective_user.id
+    )
 
     unlocked_users = (
-        context.application.bot_data.setdefault(
+        context.application.bot_data
+        .setdefault(
             "unlocked_users",
             set()
         )
@@ -407,18 +520,27 @@ async def start(
     if user_id in unlocked_users:
 
         await update.message.reply_text(
+
             "🎬 <b>Welcome back!</b>\n\n"
+
             "Send me a movie name.\n\n"
+
             "Example: Avatar",
+
             parse_mode="HTML"
         )
 
         return
 
     await update.message.reply_text(
+
         "🎬 <b>Welcome to Movie Search Bot!</b>\n\n"
+
         "🔒 Join our channel to continue.",
-        reply_markup=join_channel_keyboard(),
+
+        reply_markup=
+        join_channel_keyboard(),
+
         parse_mode="HTML"
     )
 
@@ -437,8 +559,11 @@ async def join_channel(
     await query.answer()
 
     await query.edit_message_text(
+
         "🔔",
-        reply_markup=click_channel_keyboard()
+
+        reply_markup=
+        click_channel_keyboard()
     )
 
 
@@ -456,8 +581,11 @@ async def click_channel(
     await query.answer()
 
     await query.edit_message_text(
+
         "🔔",
-        reply_markup=open_channel_keyboard()
+
+        reply_markup=
+        open_channel_keyboard()
     )
 
     # Wait 15 seconds
@@ -466,8 +594,11 @@ async def click_channel(
     try:
 
         await query.edit_message_text(
+
             "✅",
-            reply_markup=continue_keyboard()
+
+            reply_markup=
+            continue_keyboard()
         )
 
     except Exception:
@@ -488,22 +619,33 @@ async def continue_to_bot(
 
     await query.answer()
 
-    user_id = update.effective_user.id
+    user_id = (
+        update.effective_user.id
+    )
 
     unlocked_users = (
-        context.application.bot_data.setdefault(
+        context.application.bot_data
+        .setdefault(
             "unlocked_users",
             set()
         )
     )
 
-    unlocked_users.add(user_id)
+    unlocked_users.add(
+        user_id
+    )
 
     await query.edit_message_text(
+
         "🎉 <b>Access Granted!</b>\n\n"
-        "✅ You can now use the Movie Search Bot.\n\n"
+
+        "✅ You can now use the "
+        "Movie Search Bot.\n\n"
+
         "🎬 Send me a movie name.\n\n"
+
         "Example: Avatar",
+
         parse_mode="HTML"
     )
 
@@ -520,22 +662,38 @@ async def index_database_file(
     message = update.channel_post
 
     if not message:
+
         return
 
     if message.chat_id != DATABASE_CHANNEL_ID:
+
         return
 
     filename = None
 
-    # Video file
+    # =====================================================
+    # VIDEO
+    # =====================================================
+
     if message.video:
 
-        filename = message.video.file_name
+        filename = (
+            message.video.file_name
+        )
 
-    # Document file
+    # =====================================================
+    # DOCUMENT
+    # =====================================================
+
     elif message.document:
 
-        filename = message.document.file_name
+        filename = (
+            message.document.file_name
+        )
+
+    # =====================================================
+    # NO FILE
+    # =====================================================
 
     if not filename:
 
@@ -543,27 +701,29 @@ async def index_database_file(
 
     try:
 
-        # IMPORTANT:
-        # Do NOT write to SQLite here.
-        # Just queue the file.
+        # Only put it into the queue.
+        # Do NOT perform MongoDB write here.
 
         await movie_index_queue.put(
+
             (
                 filename,
                 message.message_id
             )
+
         )
 
         print(
+
             f"📥 Queued: {filename} "
             f"(message {message.message_id})"
+
         )
 
     except Exception as error:
 
         print(
-            "❌ Queue error:",
-            error
+            f"❌ Queue error: {error}"
         )
 
 
@@ -576,93 +736,42 @@ async def search(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user_id = update.effective_user.id
-
-    unlocked_users = (
-        context.application.bot_data.setdefault(
-            "unlocked_users",
-            set()
-        )
+    user_id = (
+        update.effective_user.id
     )
 
     # =====================================================
     # ACCESS CHECK
     # =====================================================
 
+    unlocked_users = (
+        context.application.bot_data
+        .setdefault(
+            "unlocked_users",
+            set()
+        )
+    )
+
     if user_id not in unlocked_users:
 
         await update.message.reply_text(
+
             "🔒 Please join the channel first.",
-            reply_markup=join_channel_keyboard()
+
+            reply_markup=
+            join_channel_keyboard()
         )
 
         return
 
     # =====================================================
-    # REQUEST LIMIT
+    # GET MOVIE NAME
     # =====================================================
 
-    request_times = (
-        context.application.bot_data.setdefault(
-            "request_times",
-            {}
-        )
+    name = (
+        update.message.text
+        .strip()
     )
-
-    now = asyncio.get_running_loop().time()
-
-    last_request = request_times.get(
-        user_id
-    )
-
-    if last_request is not None:
-
-        elapsed = now - last_request
-
-        if elapsed < REQUEST_COOLDOWN:
-
-            remaining = int(
-                REQUEST_COOLDOWN - elapsed
-            )
-
-            minutes = remaining // 60
-
-            seconds = remaining % 60
-
-            if minutes > 0:
-
-                wait_text = (
-                    f"{minutes} minute(s) "
-                    f"{seconds} second(s)"
-                )
-
-            else:
-
-                wait_text = (
-                    f"{seconds} second(s)"
-                )
-
-            await update.message.reply_text(
-                "⏳ <b>Please wait.</b>\n\n"
-                "You can make another movie "
-                "request in "
-                f"<b>{wait_text}</b>.",
-                parse_mode="HTML"
-            )
-
-            return
-
-    # =====================================================
-    # START COOLDOWN
-    # =====================================================
-
-    request_times[user_id] = now
-
-    # =====================================================
-    # MOVIE NAME
-    # =====================================================
-
-    name = update.message.text.strip()
 
     if not name:
 
@@ -673,27 +782,135 @@ async def search(
         return
 
     # =====================================================
-    # DATABASE SEARCH
+    # REQUEST LIMIT
+    # =====================================================
+
+    request_times = (
+        context.application.bot_data
+        .setdefault(
+            "request_times",
+            {}
+        )
+    )
+
+    # Lock prevents two simultaneous
+    # requests from bypassing cooldown.
+    request_lock = (
+        context.application.bot_data
+        .setdefault(
+            "request_lock",
+            asyncio.Lock()
+        )
+    )
+
+    async with request_lock:
+
+        now = (
+            asyncio.get_running_loop()
+            .time()
+        )
+
+        last_request = (
+            request_times.get(
+                user_id
+            )
+        )
+
+        if last_request is not None:
+
+            elapsed = (
+                now - last_request
+            )
+
+            if elapsed < REQUEST_COOLDOWN:
+
+                remaining = int(
+                    REQUEST_COOLDOWN
+                    - elapsed
+                )
+
+                minutes = (
+                    remaining // 60
+                )
+
+                seconds = (
+                    remaining % 60
+                )
+
+                if minutes > 0:
+
+                    wait_text = (
+                        f"{minutes} minute(s) "
+                        f"{seconds} second(s)"
+                    )
+
+                else:
+
+                    wait_text = (
+                        f"{seconds} second(s)"
+                    )
+
+                await update.message.reply_text(
+
+                    "⏳ <b>Please wait.</b>\n\n"
+
+                    "You can make another "
+                    "movie request in "
+
+                    f"<b>{wait_text}</b>.",
+
+                    parse_mode="HTML"
+                )
+
+                return
+
+        # Start cooldown
+        request_times[user_id] = now
+
+    # =====================================================
+    # SEARCH MONGODB
     # =====================================================
 
     try:
 
         matching_files = (
+
             await asyncio.to_thread(
+
                 find_movie_files,
+
                 name
             )
         )
 
-    except Exception as error:
+    except PyMongoError as error:
 
         print(
-            "❌ Search database error:",
-            error
+            f"❌ MongoDB search error: "
+            f"{error}"
         )
 
         await update.message.reply_text(
-            "⚠️ Database temporarily busy.\n\n"
+
+            "⚠️ Database temporarily "
+            "unavailable.\n\n"
+
+            "Please try again later."
+        )
+
+        return
+
+    except Exception as error:
+
+        print(
+            f"❌ Search error: "
+            f"{error}"
+        )
+
+        await update.message.reply_text(
+
+            "⚠️ Something went wrong.\n\n"
+
             "Please try again later."
         )
 
@@ -706,10 +923,14 @@ async def search(
     if matching_files:
 
         await update.message.reply_text(
+
             f"🎬 <b>{len(matching_files)} "
             f"file(s) found</b>\n\n"
+
             f"🔎 Search: <b>{name}</b>\n\n"
+
             "📤 Sending movie files...",
+
             parse_mode="HTML"
         )
 
@@ -718,20 +939,28 @@ async def search(
             try:
 
                 await context.bot.copy_message(
+
                     chat_id=user_id,
-                    from_chat_id=DATABASE_CHANNEL_ID,
+
+                    from_chat_id=
+                    DATABASE_CHANNEL_ID,
+
                     message_id=message_id
                 )
 
-                # Protect against Telegram flooding
-                await asyncio.sleep(0.3)
+                # Small delay to reduce
+                # Telegram flood risk
+                await asyncio.sleep(
+                    0.3
+                )
 
             except Exception as error:
 
                 print(
+
                     f"❌ Could not send "
-                    f"{filename}:",
-                    error
+                    f"{filename}: {error}"
+
                 )
 
         return
@@ -741,11 +970,35 @@ async def search(
     # =====================================================
 
     await update.message.reply_text(
+
         "❌ <b>Movie Not Available</b>\n\n"
+
         f"🔎 <b>{name}</b> is not available "
         "in our movie database.",
+
         parse_mode="HTML"
     )
+
+
+# =========================================================
+# SHUTDOWN
+# =========================================================
+
+async def shutdown_database(
+    application: Application
+):
+
+    global mongo_client
+
+    if mongo_client:
+
+        print(
+            "🔌 Closing MongoDB connection..."
+        )
+
+        mongo_client.close()
+
+        mongo_client = None
 
 
 # =========================================================
@@ -755,7 +1008,7 @@ async def search(
 def main():
 
     # =====================================================
-    # ENVIRONMENT
+    # CHECK ENVIRONMENT
     # =====================================================
 
     if not BOT_TOKEN:
@@ -770,8 +1023,14 @@ def main():
             "TMDB_TOKEN is missing"
         )
 
+    if not MONGODB_URI:
+
+        raise ValueError(
+            "MONGODB_URI is missing"
+        )
+
     # =====================================================
-    # DATABASE
+    # CONNECT MONGODB
     # =====================================================
 
     init_database()
@@ -781,8 +1040,11 @@ def main():
     # =====================================================
 
     threading.Thread(
+
         target=web_server,
+
         daemon=True
+
     ).start()
 
     # =====================================================
@@ -790,23 +1052,40 @@ def main():
     # =====================================================
 
     app = (
+
         Application
         .builder()
-        .token(BOT_TOKEN)
-        .concurrent_updates(16)
-        .post_init(start_index_workers)
+
+        .token(
+            BOT_TOKEN
+        )
+
+        .concurrent_updates(
+            16
+        )
+
+        .post_init(
+            start_index_workers
+        )
+
+        .post_shutdown(
+            shutdown_database
+        )
+
         .build()
     )
 
     # =====================================================
-    # START COMMAND
+    # /START
     # =====================================================
 
     app.add_handler(
+
         CommandHandler(
             "start",
             start
         )
+
     )
 
     # =====================================================
@@ -814,66 +1093,115 @@ def main():
     # =====================================================
 
     app.add_handler(
+
         CallbackQueryHandler(
+
             join_channel,
-            pattern="^join_channel$"
+
+            pattern=
+            "^join_channel$"
+
         )
+
     )
 
     app.add_handler(
+
         CallbackQueryHandler(
+
             click_channel,
-            pattern="^click_channel$"
+
+            pattern=
+            "^click_channel$"
+
         )
+
     )
 
     app.add_handler(
+
         CallbackQueryHandler(
+
             continue_to_bot,
-            pattern="^continue_to_bot$"
+
+            pattern=
+            "^continue_to_bot$"
+
         )
+
     )
 
     # =====================================================
-    # MOVIE DATABASE CHANNEL
+    # DATABASE CHANNEL
     # =====================================================
 
     app.add_handler(
+
         MessageHandler(
+
             filters.UpdateType.CHANNEL_POST
+
             & filters.Chat(
-                chat_id=DATABASE_CHANNEL_ID
+                chat_id=
+                DATABASE_CHANNEL_ID
             )
+
             & (
+
                 filters.VIDEO
+
                 | filters.Document.ALL
+
             ),
+
             index_database_file
+
         )
+
     )
 
     # =====================================================
-    # USER SEARCH
+    # USER MOVIE SEARCH
     # =====================================================
 
     app.add_handler(
+
         MessageHandler(
+
             filters.TEXT
             & ~filters.COMMAND,
+
             search
+
         )
+
     )
 
     # =====================================================
-    # START
+    # START BOT
     # =====================================================
 
     print(
         "🤖 Bot is running!"
     )
 
+    print(
+        "🗄️ Database: MongoDB Atlas"
+    )
+
+    print(
+        "🎬 Movie indexing enabled"
+    )
+
+    print(
+        "⏱️ Request cooldown: "
+        f"{REQUEST_COOLDOWN} seconds"
+    )
+
     app.run_polling(
+
         drop_pending_updates=False
+
     )
 
 
