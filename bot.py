@@ -25,13 +25,10 @@ PORT = int(os.getenv("PORT", "10000"))
 # CHANNEL SETTINGS
 # =========================================================
 
-# Existing access channel
 CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 
-# Movie Database Channel
 DATABASE_CHANNEL_ID = -1004463648734
 
-# Local movie index
 DB_FILE = "movie_files.db"
 
 
@@ -86,7 +83,6 @@ def find_movie_files(search_text):
 
     cursor = conn.cursor()
 
-    # Filename must START with the user's search text
     cursor.execute("""
         SELECT filename, message_id
         FROM movie_files
@@ -349,7 +345,7 @@ async def continue_to_bot(
 
 
 # =========================================================
-# INDEX MOVIE FILES FROM DATABASE CHANNEL
+# INDEX MOVIE FILES
 # =========================================================
 
 async def index_database_file(
@@ -367,12 +363,10 @@ async def index_database_file(
 
     filename = None
 
-    # Video
     if message.video:
 
         filename = message.video.file_name
 
-    # Document
     elif message.document:
 
         filename = message.document.file_name
@@ -390,16 +384,6 @@ async def index_database_file(
         print(
             f"Movie indexed: {filename} "
             f"(message {message.message_id})"
-        )
-
-        # Optional confirmation in database channel
-        await context.bot.send_message(
-            chat_id=DATABASE_CHANNEL_ID,
-            text=(
-                "✅ <b>File Added To Movie Database</b>\n\n"
-                f"🎬 {filename}"
-            ),
-            parse_mode="HTML"
         )
 
     except Exception as error:
@@ -437,10 +421,6 @@ async def search(
 
     name = update.message.text.strip()
 
-    # -----------------------------------------------------
-    # FIRST: CHECK MOVIE DATABASE BY FILENAME
-    # -----------------------------------------------------
-
     matching_files = find_movie_files(name)
 
     if matching_files:
@@ -462,8 +442,7 @@ async def search(
                     message_id=message_id
                 )
 
-                # Small delay to avoid sending everything at once
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
             except Exception as error:
 
@@ -473,10 +452,6 @@ async def search(
                 )
 
         return
-
-    # -----------------------------------------------------
-    # NO FILE FOUND
-    # -----------------------------------------------------
 
     await update.message.reply_text(
         "❌ <b>Movie Not Available</b>\n\n"
@@ -504,10 +479,8 @@ def main():
             "TMDB_TOKEN is missing"
         )
 
-    # Create database
     init_database()
 
-    # Render health server
     threading.Thread(
         target=web_server,
         daemon=True
@@ -517,13 +490,11 @@ def main():
         Application
         .builder()
         .token(BOT_TOKEN)
+        .concurrent_updates(16)
         .build()
     )
 
-    # =====================================================
     # START
-    # =====================================================
-
     app.add_handler(
         CommandHandler(
             "start",
@@ -531,10 +502,7 @@ def main():
         )
     )
 
-    # =====================================================
     # ACCESS FLOW
-    # =====================================================
-
     app.add_handler(
         CallbackQueryHandler(
             join_channel,
@@ -556,10 +524,7 @@ def main():
         )
     )
 
-    # =====================================================
     # DATABASE CHANNEL
-    # =====================================================
-
     app.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POST
@@ -574,10 +539,7 @@ def main():
         )
     )
 
-    # =====================================================
-    # USER TEXT SEARCH
-    # =====================================================
-
+    # USER SEARCH
     app.add_handler(
         MessageHandler(
             filters.TEXT
@@ -590,7 +552,11 @@ def main():
         "🤖 Bot is running!"
     )
 
-    app.run_polling()
+    # IMPORTANT:
+    # Clear the old backlog of Telegram updates once.
+    app.run_polling(
+        drop_pending_updates=True
+    )
 
 
 if __name__ == "__main__":
