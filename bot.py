@@ -75,10 +75,7 @@ REQUEST_COOLDOWN = 120
 # INDEXING SETTINGS
 # =========================================================
 
-# Number of background MongoDB workers
 INDEX_WORKERS = 4
-
-# Maximum files waiting in memory
 INDEX_QUEUE_SIZE = 5000
 
 movie_index_queue = None
@@ -104,12 +101,10 @@ def init_database():
     mongo_client = MongoClient(
         MONGODB_URI,
 
-        # Connection settings
         serverSelectionTimeoutMS=10000,
         connectTimeoutMS=10000,
         socketTimeoutMS=30000,
 
-        # Keep connection pool healthy
         maxPoolSize=20,
         minPoolSize=1,
 
@@ -119,13 +114,19 @@ def init_database():
     # Test connection
     mongo_client.admin.command("ping")
 
-    print("✅ MongoDB connection successful")
+    print(
+        "✅ MongoDB connection successful"
+    )
 
-    database = mongo_client[MONGODB_DATABASE]
+    database = mongo_client[
+        MONGODB_DATABASE
+    ]
 
-    movie_collection = database[MONGODB_COLLECTION]
+    movie_collection = database[
+        MONGODB_COLLECTION
+    ]
 
-    # Create unique index on Telegram message ID
+    # Unique Telegram message ID
     movie_collection.create_index(
         [
             ("message_id", ASCENDING)
@@ -133,7 +134,7 @@ def init_database():
         unique=True
     )
 
-    # Create index for fast filename searching
+    # Filename search index
     movie_collection.create_index(
         [
             ("filename_lower", ASCENDING)
@@ -160,7 +161,11 @@ def save_movie_file(
             "MongoDB is not initialized"
         )
 
-    filename_lower = filename.strip().lower()
+    filename_lower = (
+        filename
+        .strip()
+        .lower()
+    )
 
     movie_collection.update_one(
 
@@ -204,15 +209,18 @@ def find_movie_files(
 
         return []
 
-    # Escape special regex characters
+    # Search only filenames
+    # that START with the user's search
     escaped_text = re.escape(
         search_text
     )
 
-    # Filename MUST START with search text
-    regex_pattern = "^" + escaped_text
+    regex_pattern = (
+        "^" + escaped_text
+    )
 
     cursor = movie_collection.find(
+
         {
             "filename_lower": {
                 "$regex": regex_pattern
@@ -224,6 +232,7 @@ def find_movie_files(
             "filename": 1,
             "message_id": 1
         }
+
     ).sort(
         "filename_lower",
         ASCENDING
@@ -264,8 +273,6 @@ async def movie_index_worker(
 
         try:
 
-            # MongoDB operation runs outside
-            # the Telegram event loop
             await asyncio.to_thread(
                 save_movie_file,
                 filename,
@@ -329,7 +336,12 @@ class HealthHandler(
     BaseHTTPRequestHandler
 ):
 
-    def do_GET(self):
+    def _send_health_response(
+        self,
+        include_body=True
+    ):
+
+        body = b"Bot is running!"
 
         self.send_response(200)
 
@@ -338,10 +350,31 @@ class HealthHandler(
             "text/plain"
         )
 
+        self.send_header(
+            "Content-Length",
+            str(len(body))
+        )
+
         self.end_headers()
 
-        self.wfile.write(
-            b"Bot is running!"
+        if include_body:
+
+            self.wfile.write(
+                body
+            )
+
+    # UptimeRobot / normal browser
+    def do_GET(self):
+
+        self._send_health_response(
+            include_body=True
+        )
+
+    # Some monitoring services use HEAD
+    def do_HEAD(self):
+
+        self._send_health_response(
+            include_body=False
         )
 
     def log_message(
@@ -671,38 +704,26 @@ async def index_database_file(
 
     filename = None
 
-    # =====================================================
     # VIDEO
-    # =====================================================
-
     if message.video:
 
         filename = (
             message.video.file_name
         )
 
-    # =====================================================
     # DOCUMENT
-    # =====================================================
-
     elif message.document:
 
         filename = (
             message.document.file_name
         )
 
-    # =====================================================
     # NO FILE
-    # =====================================================
-
     if not filename:
 
         return
 
     try:
-
-        # Only put it into the queue.
-        # Do NOT perform MongoDB write here.
 
         await movie_index_queue.put(
 
@@ -793,8 +814,6 @@ async def search(
         )
     )
 
-    # Lock prevents two simultaneous
-    # requests from bypassing cooldown.
     request_lock = (
         context.application.bot_data
         .setdefault(
@@ -948,8 +967,6 @@ async def search(
                     message_id=message_id
                 )
 
-                # Small delay to reduce
-                # Telegram flood risk
                 await asyncio.sleep(
                     0.3
                 )
