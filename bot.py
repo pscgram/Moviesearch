@@ -22,6 +22,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ChatJoinRequestHandler,
     ContextTypes,
     filters,
 )
@@ -44,6 +45,8 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 # EXISTING ACCESS CHANNEL
 # =========================================================
 
+ACCESS_CHANNEL_ID = -1004290623496
+
 CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 
 
@@ -52,6 +55,13 @@ CHANNEL_LINK = "https://t.me/+SqgUfajesfw1ZDhh"
 # =========================================================
 
 DATABASE_CHANNEL_ID = -1004463648734
+
+
+# =========================================================
+# LOG CHANNEL
+# =========================================================
+
+LOG_CHANNEL_ID = -1004407816036
 
 
 # =========================================================
@@ -88,8 +98,6 @@ movie_index_queue = None
 
 WEBHOOK_PATH = "/telegram"
 
-# Create a valid Telegram secret automatically.
-# Nothing needs to be added to Render Environment Variables.
 WEBHOOK_SECRET = hashlib.sha256(
     (BOT_TOKEN or "").encode()
 ).hexdigest()
@@ -348,6 +356,86 @@ def movie_details(movie_id):
 
 
 # =========================================================
+# LOGGING HELPERS
+# =========================================================
+
+def get_user_name(user):
+
+    if not user:
+        return "Unknown"
+
+    name = " ".join(
+        part for part in [
+            user.first_name,
+            user.last_name
+        ]
+        if part
+    )
+
+    if not name:
+        name = "Unknown"
+
+    if user.username:
+        return f"{name} (@{user.username})"
+
+    return name
+
+
+async def send_log(context, text):
+
+    try:
+
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=text,
+            disable_web_page_preview=True
+        )
+
+    except Exception as error:
+
+        print(
+            f"⚠️ Log channel error: {error}"
+        )
+
+
+async def log_new_user(update, context):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    logged_users = (
+        context.application.bot_data
+        .setdefault(
+            "logged_users",
+            set()
+        )
+    )
+
+    # Only log a user the first time
+    if user.id in logged_users:
+        return
+
+    logged_users.add(user.id)
+
+    text = (
+        "👤 <b>NEW BOT USER</b>\n\n"
+        f"Name: {get_user_name(user)}\n"
+        f"User ID: <code>{user.id}</code>\n"
+        f"Username: "
+        f"{('@' + user.username) if user.username else 'None'}\n"
+        f"Language: "
+        f"{user.language_code or 'Unknown'}"
+    )
+
+    await send_log(
+        context,
+        text
+    )
+
+
+# =========================================================
 # ACCESS BUTTONS
 # =========================================================
 
@@ -405,7 +493,17 @@ def continue_keyboard():
 
 async def start(update, context):
 
-    user_id = update.effective_user.id
+    user = update.effective_user
+
+    if not user:
+        return
+
+    await log_new_user(
+        update,
+        context
+    )
+
+    user_id = user.id
 
     unlocked_users = (
         context.application.bot_data
@@ -488,7 +586,9 @@ async def continue_to_bot(update, context):
 
     await query.answer()
 
-    user_id = update.effective_user.id
+    user = update.effective_user
+
+    user_id = user.id
 
     unlocked_users = (
         context.application.bot_data
@@ -500,6 +600,15 @@ async def continue_to_bot(update, context):
 
     unlocked_users.add(user_id)
 
+    await send_log(
+        context,
+        "🎉 <b>ACCESS GRANTED</b>\n\n"
+        f"Name: {get_user_name(user)}\n"
+        f"User ID: <code>{user.id}</code>\n"
+        f"Username: "
+        f"{('@' + user.username) if user.username else 'None'}"
+    )
+
     await query.edit_message_text(
         "🎉 <b>Access Granted!</b>\n\n"
         "✅ You can now use the "
@@ -508,6 +617,52 @@ async def continue_to_bot(update, context):
         "Example: Avatar",
         parse_mode="HTML"
     )
+
+
+# =========================================================
+# JOIN REQUEST LOGGING
+# =========================================================
+
+async def join_request_handler(
+    update,
+    context
+):
+
+    request = update.chat_join_request
+
+    if not request:
+        return
+
+    user = request.from_user
+
+    invite_link = "Unknown"
+
+    if request.invite_link:
+
+        invite_link = (
+            request.invite_link.invite_link
+        )
+
+    try:
+
+        await send_log(
+            context,
+            "📩 <b>NEW JOIN REQUEST</b>\n\n"
+            f"Name: {get_user_name(user)}\n"
+            f"User ID: <code>{user.id}</code>\n"
+            f"Username: "
+            f"{('@' + user.username) if user.username else 'None'}\n"
+            f"Channel ID: <code>{request.chat.id}</code>\n"
+            f"Invite Link: {invite_link}\n"
+            f"Request Time: {request.date}"
+        )
+
+    except Exception as error:
+
+        print(
+            f"❌ Join request log error: "
+            f"{error}"
+        )
 
 
 # =========================================================
@@ -566,7 +721,12 @@ async def index_database_file(update, context):
 
 async def search(update, context):
 
-    user_id = update.effective_user.id
+    user = update.effective_user
+
+    if not user:
+        return
+
+    user_id = user.id
 
     unlocked_users = (
         context.application.bot_data
@@ -676,6 +836,18 @@ async def search(update, context):
         request_times[user_id] = now
 
     # =====================================================
+    # LOG SEARCH
+    # =====================================================
+
+    await send_log(
+        context,
+        "🔎 <b>MOVIE SEARCH</b>\n\n"
+        f"User: {get_user_name(user)}\n"
+        f"User ID: <code>{user.id}</code>\n"
+        f"Search: <b>{name}</b>"
+    )
+
+    # =====================================================
     # MONGODB SEARCH
     # =====================================================
 
@@ -731,6 +903,8 @@ async def search(update, context):
             parse_mode="HTML"
         )
 
+        delivered = 0
+
         for filename, message_id in matching_files:
 
             try:
@@ -741,6 +915,8 @@ async def search(update, context):
                     message_id=message_id
                 )
 
+                delivered += 1
+
                 await asyncio.sleep(0.3)
 
             except Exception as error:
@@ -749,6 +925,20 @@ async def search(update, context):
                     f"❌ Could not send "
                     f"{filename}: {error}"
                 )
+
+        # =================================================
+        # LOG DELIVERY
+        # =================================================
+
+        await send_log(
+            context,
+            "🎬 <b>MOVIE DELIVERY</b>\n\n"
+            f"User: {get_user_name(user)}\n"
+            f"User ID: <code>{user.id}</code>\n"
+            f"Search: <b>{name}</b>\n"
+            f"Files found: <b>{len(matching_files)}</b>\n"
+            f"Files delivered: <b>{delivered}</b>"
+        )
 
         return
 
@@ -762,6 +952,87 @@ async def search(update, context):
         "in our movie database.",
         parse_mode="HTML"
     )
+
+    await send_log(
+        context,
+        "❌ <b>MOVIE NOT FOUND</b>\n\n"
+        f"User: {get_user_name(user)}\n"
+        f"User ID: <code>{user.id}</code>\n"
+        f"Search: <b>{name}</b>"
+    )
+
+
+# =========================================================
+# STATISTICS
+# =========================================================
+
+async def stats(update, context):
+
+    # /stats works only inside the Log Channel
+    if not update.effective_chat:
+        return
+
+    if update.effective_chat.id != LOG_CHANNEL_ID:
+        return
+
+    try:
+
+        # Number of indexed movie files
+        movie_count = await asyncio.to_thread(
+            movie_collection.count_documents,
+            {}
+        )
+
+        # Current access-channel member count
+        member_count = (
+            await context.bot.get_chat_member_count(
+                ACCESS_CHANNEL_ID
+            )
+        )
+
+        # Number of users currently known
+        logged_users = (
+            context.application.bot_data
+            .get(
+                "logged_users",
+                set()
+            )
+        )
+
+        bot_users = len(logged_users)
+
+        text = (
+            "📊 <b>BOT STATISTICS</b>\n\n"
+            f"👤 Bot Users Logged: "
+            f"<b>{bot_users}</b>\n"
+            f"👥 Access Channel Members: "
+            f"<b>{member_count}</b>\n"
+            f"🎬 Indexed Movie Files: "
+            f"<b>{movie_count}</b>\n\n"
+            "ℹ️ Send /stats again anytime "
+            "to refresh."
+        )
+
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=text,
+            parse_mode="HTML"
+        )
+
+    except Exception as error:
+
+        print(
+            f"❌ Stats error: {error}"
+        )
+
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=(
+                "⚠️ Could not retrieve "
+                "statistics.\n\n"
+                f"Error: {error}"
+            )
+        )
 
 
 # =========================================================
@@ -783,7 +1054,6 @@ async def telegram_webhook(
     request
 ):
 
-    # Verify Telegram's secret header
     secret = request.headers.get(
         "X-Telegram-Bot-Api-Secret-Token"
     )
@@ -809,8 +1079,6 @@ async def telegram_webhook(
             application.bot
         )
 
-        # Put update into PTB queue.
-        # PTB processes it asynchronously.
         await application.update_queue.put(
             update
         )
@@ -963,6 +1231,13 @@ async def main():
     )
 
     application.add_handler(
+        CommandHandler(
+            "stats",
+            stats
+        )
+    )
+
+    application.add_handler(
         CallbackQueryHandler(
             join_channel,
             pattern="^join_channel$"
@@ -983,6 +1258,14 @@ async def main():
         )
     )
 
+    # Join-request logging
+    application.add_handler(
+        ChatJoinRequestHandler(
+            join_request_handler
+        )
+    )
+
+    # Movie database channel
     application.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POST
@@ -997,6 +1280,7 @@ async def main():
         )
     )
 
+    # User movie searches
     application.add_handler(
         MessageHandler(
             filters.TEXT
@@ -1038,7 +1322,6 @@ async def main():
         webhook_url
     )
 
-    # This replaces any old polling/webhook configuration.
     await application.bot.set_webhook(
         url=webhook_url,
         secret_token=WEBHOOK_SECRET,
@@ -1074,10 +1357,13 @@ async def main():
     )
 
     print(
+        "📊 Log channel enabled"
+    )
+
+    print(
         "🚫 Telegram polling disabled"
     )
 
-    # Keep application alive
     try:
 
         await asyncio.Event().wait()
