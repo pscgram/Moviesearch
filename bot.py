@@ -2,11 +2,11 @@ import os
 import json
 import urllib.parse
 import urllib.request
-import threading
 import asyncio
 import re
+import hashlib
 
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from aiohttp import web
 
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import PyMongoError
@@ -37,6 +37,8 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 
 PORT = int(os.getenv("PORT", "10000"))
 
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+
 
 # =========================================================
 # EXISTING ACCESS CHANNEL
@@ -53,7 +55,7 @@ DATABASE_CHANNEL_ID = -1004463648734
 
 
 # =========================================================
-# MONGODB SETTINGS
+# MONGODB
 # =========================================================
 
 MONGODB_DATABASE = "pscgram"
@@ -67,18 +69,30 @@ movie_collection = None
 # USER REQUEST LIMIT
 # =========================================================
 
-# One movie request every 2 minutes per user
 REQUEST_COOLDOWN = 120
 
 
 # =========================================================
-# INDEXING SETTINGS
+# INDEXING
 # =========================================================
 
 INDEX_WORKERS = 4
 INDEX_QUEUE_SIZE = 5000
 
 movie_index_queue = None
+
+
+# =========================================================
+# WEBHOOK
+# =========================================================
+
+WEBHOOK_PATH = "/telegram"
+
+# Create a valid Telegram secret automatically.
+# Nothing needs to be added to Render Environment Variables.
+WEBHOOK_SECRET = hashlib.sha256(
+    (BOT_TOKEN or "").encode()
+).hexdigest()
 
 
 # =========================================================
@@ -91,88 +105,57 @@ def init_database():
     global movie_collection
 
     if not MONGODB_URI:
-
-        raise ValueError(
-            "MONGODB_URI is missing"
-        )
+        raise ValueError("MONGODB_URI is missing")
 
     print("🔌 Connecting to MongoDB...")
 
     mongo_client = MongoClient(
         MONGODB_URI,
-
         serverSelectionTimeoutMS=10000,
         connectTimeoutMS=10000,
         socketTimeoutMS=30000,
-
         maxPoolSize=20,
         minPoolSize=1,
-
         retryWrites=True
     )
 
-    # Test connection
     mongo_client.admin.command("ping")
 
-    print(
-        "✅ MongoDB connection successful"
-    )
+    print("✅ MongoDB connection successful")
 
-    database = mongo_client[
-        MONGODB_DATABASE
-    ]
+    database = mongo_client[MONGODB_DATABASE]
 
-    movie_collection = database[
-        MONGODB_COLLECTION
-    ]
+    movie_collection = database[MONGODB_COLLECTION]
 
-    # Unique Telegram message ID
     movie_collection.create_index(
-        [
-            ("message_id", ASCENDING)
-        ],
+        [("message_id", ASCENDING)],
         unique=True
     )
 
-    # Filename search index
     movie_collection.create_index(
-        [
-            ("filename_lower", ASCENDING)
-        ]
+        [("filename_lower", ASCENDING)]
     )
 
-    print(
-        "✅ MongoDB indexes ready"
-    )
+    print("✅ MongoDB indexes ready")
 
 
 # =========================================================
-# SAVE MOVIE FILE
+# SAVE MOVIE
 # =========================================================
 
-def save_movie_file(
-    filename,
-    message_id
-):
+def save_movie_file(filename, message_id):
 
     if movie_collection is None:
-
         raise RuntimeError(
             "MongoDB is not initialized"
         )
 
-    filename_lower = (
-        filename
-        .strip()
-        .lower()
-    )
+    filename_lower = filename.strip().lower()
 
     movie_collection.update_one(
-
         {
             "message_id": message_id
         },
-
         {
             "$set": {
                 "filename": filename,
@@ -180,21 +163,17 @@ def save_movie_file(
                 "message_id": message_id
             }
         },
-
         upsert=True
     )
 
 
 # =========================================================
-# SEARCH MOVIE FILES
+# SEARCH MOVIES
 # =========================================================
 
-def find_movie_files(
-    search_text
-):
+def find_movie_files(search_text):
 
     if movie_collection is None:
-
         raise RuntimeError(
             "MongoDB is not initialized"
         )
@@ -206,33 +185,23 @@ def find_movie_files(
     )
 
     if not search_text:
-
         return []
 
-    # Search only filenames
-    # that START with the user's search
-    escaped_text = re.escape(
-        search_text
-    )
+    escaped_text = re.escape(search_text)
 
-    regex_pattern = (
-        "^" + escaped_text
-    )
+    regex_pattern = "^" + escaped_text
 
     cursor = movie_collection.find(
-
         {
             "filename_lower": {
                 "$regex": regex_pattern
             }
         },
-
         {
             "_id": 0,
             "filename": 1,
             "message_id": 1
         }
-
     ).sort(
         "filename_lower",
         ASCENDING
@@ -253,12 +222,10 @@ def find_movie_files(
 
 
 # =========================================================
-# BACKGROUND INDEX WORKER
+# INDEX WORKER
 # =========================================================
 
-async def movie_index_worker(
-    worker_id
-):
+async def movie_index_worker(worker_id):
 
     print(
         f"🗃️ MongoDB index worker "
@@ -301,9 +268,7 @@ async def movie_index_worker(
 # START INDEX WORKERS
 # =========================================================
 
-async def start_index_workers(
-    application: Application
-):
+async def start_index_workers(application):
 
     global movie_index_queue
 
@@ -317,9 +282,7 @@ async def start_index_workers(
     ):
 
         application.create_task(
-            movie_index_worker(
-                worker_id
-            )
+            movie_index_worker(worker_id)
         )
 
     print(
@@ -329,95 +292,16 @@ async def start_index_workers(
 
 
 # =========================================================
-# RENDER HEALTH SERVER
-# =========================================================
-
-class HealthHandler(
-    BaseHTTPRequestHandler
-):
-
-    def _send_health_response(
-        self,
-        include_body=True
-    ):
-
-        body = b"Bot is running!"
-
-        self.send_response(200)
-
-        self.send_header(
-            "Content-Type",
-            "text/plain"
-        )
-
-        self.send_header(
-            "Content-Length",
-            str(len(body))
-        )
-
-        self.end_headers()
-
-        if include_body:
-
-            self.wfile.write(
-                body
-            )
-
-    # UptimeRobot / normal browser
-    def do_GET(self):
-
-        self._send_health_response(
-            include_body=True
-        )
-
-    # Some monitoring services use HEAD
-    def do_HEAD(self):
-
-        self._send_health_response(
-            include_body=False
-        )
-
-    def log_message(
-        self,
-        format,
-        *args
-    ):
-
-        pass
-
-
-def web_server():
-
-    server = HTTPServer(
-        (
-            "0.0.0.0",
-            PORT
-        ),
-        HealthHandler
-    )
-
-    print(
-        f"🌐 Health server running "
-        f"on port {PORT}"
-    )
-
-    server.serve_forever()
-
-
-# =========================================================
 # TMDB
 # =========================================================
 
 def tmdb_request(url):
 
     req = urllib.request.Request(
-
         url,
-
         headers={
             "Authorization":
                 "Bearer " + TMDB_TOKEN,
-
             "accept":
                 "application/json"
         }
@@ -437,9 +321,7 @@ def tmdb_request(url):
 
 def search_movies(name):
 
-    query = urllib.parse.quote(
-        name
-    )
+    query = urllib.parse.quote(name)
 
     url = (
         "https://api.themoviedb.org/3/"
@@ -450,9 +332,7 @@ def search_movies(name):
         "&page=1"
     )
 
-    return tmdb_request(
-        url
-    )
+    return tmdb_request(url)
 
 
 def movie_details(movie_id):
@@ -464,9 +344,7 @@ def movie_details(movie_id):
         + "?language=en-US"
     )
 
-    return tmdb_request(
-        url
-    )
+    return tmdb_request(url)
 
 
 # =========================================================
@@ -476,56 +354,48 @@ def movie_details(movie_id):
 def join_channel_keyboard():
 
     return InlineKeyboardMarkup([
-
         [
             InlineKeyboardButton(
                 "🔔 Join Channel",
                 callback_data="join_channel"
             )
         ]
-
     ])
 
 
 def click_channel_keyboard():
 
     return InlineKeyboardMarkup([
-
         [
             InlineKeyboardButton(
                 "🔔 Click Channel",
                 callback_data="click_channel"
             )
         ]
-
     ])
 
 
 def open_channel_keyboard():
 
     return InlineKeyboardMarkup([
-
         [
             InlineKeyboardButton(
                 "🔗 Open Private Channel",
                 url=CHANNEL_LINK
             )
         ]
-
     ])
 
 
 def continue_keyboard():
 
     return InlineKeyboardMarkup([
-
         [
             InlineKeyboardButton(
                 "✅ Continue to Bot",
                 callback_data="continue_to_bot"
             )
         ]
-
     ])
 
 
@@ -533,14 +403,9 @@ def continue_keyboard():
 # START
 # =========================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update, context):
 
-    user_id = (
-        update.effective_user.id
-    )
+    user_id = update.effective_user.id
 
     unlocked_users = (
         context.application.bot_data
@@ -553,27 +418,18 @@ async def start(
     if user_id in unlocked_users:
 
         await update.message.reply_text(
-
             "🎬 <b>Welcome back!</b>\n\n"
-
             "Send me a movie name.\n\n"
-
             "Example: Avatar",
-
             parse_mode="HTML"
         )
 
         return
 
     await update.message.reply_text(
-
         "🎬 <b>Welcome to Movie Search Bot!</b>\n\n"
-
         "🔒 Join our channel to continue.",
-
-        reply_markup=
-        join_channel_keyboard(),
-
+        reply_markup=join_channel_keyboard(),
         parse_mode="HTML"
     )
 
@@ -582,21 +438,15 @@ async def start(
 # STEP 1
 # =========================================================
 
-async def join_channel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def join_channel(update, context):
 
     query = update.callback_query
 
     await query.answer()
 
     await query.edit_message_text(
-
         "🔔",
-
-        reply_markup=
-        click_channel_keyboard()
+        reply_markup=click_channel_keyboard()
     )
 
 
@@ -604,38 +454,27 @@ async def join_channel(
 # STEP 2
 # =========================================================
 
-async def click_channel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def click_channel(update, context):
 
     query = update.callback_query
 
     await query.answer()
 
     await query.edit_message_text(
-
         "🔔",
-
-        reply_markup=
-        open_channel_keyboard()
+        reply_markup=open_channel_keyboard()
     )
 
-    # Wait 15 seconds
     await asyncio.sleep(15)
 
     try:
 
         await query.edit_message_text(
-
             "✅",
-
-            reply_markup=
-            continue_keyboard()
+            reply_markup=continue_keyboard()
         )
 
     except Exception:
-
         pass
 
 
@@ -643,18 +482,13 @@ async def click_channel(
 # STEP 3
 # =========================================================
 
-async def continue_to_bot(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def continue_to_bot(update, context):
 
     query = update.callback_query
 
     await query.answer()
 
-    user_id = (
-        update.effective_user.id
-    )
+    user_id = update.effective_user.id
 
     unlocked_users = (
         context.application.bot_data
@@ -664,21 +498,14 @@ async def continue_to_bot(
         )
     )
 
-    unlocked_users.add(
-        user_id
-    )
+    unlocked_users.add(user_id)
 
     await query.edit_message_text(
-
         "🎉 <b>Access Granted!</b>\n\n"
-
         "✅ You can now use the "
         "Movie Search Bot.\n\n"
-
         "🎬 Send me a movie name.\n\n"
-
         "Example: Avatar",
-
         parse_mode="HTML"
     )
 
@@ -687,19 +514,14 @@ async def continue_to_bot(
 # DATABASE CHANNEL
 # =========================================================
 
-async def index_database_file(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def index_database_file(update, context):
 
     message = update.channel_post
 
     if not message:
-
         return
 
     if message.chat_id != DATABASE_CHANNEL_ID:
-
         return
 
     filename = None
@@ -707,38 +529,28 @@ async def index_database_file(
     # VIDEO
     if message.video:
 
-        filename = (
-            message.video.file_name
-        )
+        filename = message.video.file_name
 
     # DOCUMENT
     elif message.document:
 
-        filename = (
-            message.document.file_name
-        )
+        filename = message.document.file_name
 
-    # NO FILE
     if not filename:
-
         return
 
     try:
 
         await movie_index_queue.put(
-
             (
                 filename,
                 message.message_id
             )
-
         )
 
         print(
-
             f"📥 Queued: {filename} "
             f"(message {message.message_id})"
-
         )
 
     except Exception as error:
@@ -752,18 +564,9 @@ async def index_database_file(
 # MOVIE SEARCH
 # =========================================================
 
-async def search(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def search(update, context):
 
-    user_id = (
-        update.effective_user.id
-    )
-
-    # =====================================================
-    # ACCESS CHECK
-    # =====================================================
+    user_id = update.effective_user.id
 
     unlocked_users = (
         context.application.bot_data
@@ -776,18 +579,11 @@ async def search(
     if user_id not in unlocked_users:
 
         await update.message.reply_text(
-
             "🔒 Please join the channel first.",
-
-            reply_markup=
-            join_channel_keyboard()
+            reply_markup=join_channel_keyboard()
         )
 
         return
-
-    # =====================================================
-    # GET MOVIE NAME
-    # =====================================================
 
     name = (
         update.message.text
@@ -803,7 +599,7 @@ async def search(
         return
 
     # =====================================================
-    # REQUEST LIMIT
+    # RATE LIMIT
     # =====================================================
 
     request_times = (
@@ -830,9 +626,7 @@ async def search(
         )
 
         last_request = (
-            request_times.get(
-                user_id
-            )
+            request_times.get(user_id)
         )
 
         if last_request is not None:
@@ -870,34 +664,26 @@ async def search(
                     )
 
                 await update.message.reply_text(
-
                     "⏳ <b>Please wait.</b>\n\n"
-
                     "You can make another "
                     "movie request in "
-
                     f"<b>{wait_text}</b>.",
-
                     parse_mode="HTML"
                 )
 
                 return
 
-        # Start cooldown
         request_times[user_id] = now
 
     # =====================================================
-    # SEARCH MONGODB
+    # MONGODB SEARCH
     # =====================================================
 
     try:
 
         matching_files = (
-
             await asyncio.to_thread(
-
                 find_movie_files,
-
                 name
             )
         )
@@ -910,10 +696,8 @@ async def search(
         )
 
         await update.message.reply_text(
-
             "⚠️ Database temporarily "
             "unavailable.\n\n"
-
             "Please try again later."
         )
 
@@ -927,9 +711,7 @@ async def search(
         )
 
         await update.message.reply_text(
-
             "⚠️ Something went wrong.\n\n"
-
             "Please try again later."
         )
 
@@ -942,14 +724,10 @@ async def search(
     if matching_files:
 
         await update.message.reply_text(
-
             f"🎬 <b>{len(matching_files)} "
             f"file(s) found</b>\n\n"
-
             f"🔎 Search: <b>{name}</b>\n\n"
-
             "📤 Sending movie files...",
-
             parse_mode="HTML"
         )
 
@@ -958,26 +736,18 @@ async def search(
             try:
 
                 await context.bot.copy_message(
-
                     chat_id=user_id,
-
-                    from_chat_id=
-                    DATABASE_CHANNEL_ID,
-
+                    from_chat_id=DATABASE_CHANNEL_ID,
                     message_id=message_id
                 )
 
-                await asyncio.sleep(
-                    0.3
-                )
+                await asyncio.sleep(0.3)
 
             except Exception as error:
 
                 print(
-
                     f"❌ Could not send "
                     f"{filename}: {error}"
-
                 )
 
         return
@@ -987,23 +757,131 @@ async def search(
     # =====================================================
 
     await update.message.reply_text(
-
         "❌ <b>Movie Not Available</b>\n\n"
-
         f"🔎 <b>{name}</b> is not available "
         "in our movie database.",
-
         parse_mode="HTML"
     )
 
 
 # =========================================================
-# SHUTDOWN
+# HEALTH CHECK
 # =========================================================
 
-async def shutdown_database(
-    application: Application
+async def health(request):
+
+    return web.Response(
+        text="Bot is running!"
+    )
+
+
+# =========================================================
+# TELEGRAM WEBHOOK
+# =========================================================
+
+async def telegram_webhook(
+    request
 ):
+
+    # Verify Telegram's secret header
+    secret = request.headers.get(
+        "X-Telegram-Bot-Api-Secret-Token"
+    )
+
+    if secret != WEBHOOK_SECRET:
+
+        print(
+            "⚠️ Rejected unauthorized "
+            "webhook request"
+        )
+
+        return web.Response(
+            status=403,
+            text="Forbidden"
+        )
+
+    try:
+
+        data = await request.json()
+
+        update = Update.de_json(
+            data,
+            application.bot
+        )
+
+        # Put update into PTB queue.
+        # PTB processes it asynchronously.
+        await application.update_queue.put(
+            update
+        )
+
+        return web.Response(
+            status=200,
+            text="OK"
+        )
+
+    except Exception as error:
+
+        print(
+            f"❌ Webhook error: {error}"
+        )
+
+        return web.Response(
+            status=500,
+            text="Webhook error"
+        )
+
+
+# =========================================================
+# WEB SERVER
+# =========================================================
+
+async def start_web_server():
+
+    app_web = web.Application()
+
+    app_web.router.add_get(
+        "/",
+        health
+    )
+
+    app_web.router.add_get(
+        "/health",
+        health
+    )
+
+    app_web.router.add_post(
+        WEBHOOK_PATH,
+        telegram_webhook
+    )
+
+    runner = web.AppRunner(
+        app_web
+    )
+
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        PORT
+    )
+
+    await site.start()
+
+    print(
+        f"🌐 Web server running "
+        f"on port {PORT}"
+    )
+
+    return runner
+
+
+# =========================================================
+# SHUTDOWN DATABASE
+# =========================================================
+
+async def shutdown_database():
 
     global mongo_client
 
@@ -1022,7 +900,9 @@ async def shutdown_database(
 # MAIN
 # =========================================================
 
-def main():
+async def main():
+
+    global application
 
     # =====================================================
     # CHECK ENVIRONMENT
@@ -1046,160 +926,138 @@ def main():
             "MONGODB_URI is missing"
         )
 
+    if not RENDER_EXTERNAL_URL:
+
+        raise ValueError(
+            "RENDER_EXTERNAL_URL is missing"
+        )
+
     # =====================================================
-    # CONNECT MONGODB
+    # MONGODB
     # =====================================================
 
     init_database()
 
     # =====================================================
-    # RENDER HEALTH SERVER
-    # =====================================================
-
-    threading.Thread(
-
-        target=web_server,
-
-        daemon=True
-
-    ).start()
-
-    # =====================================================
     # TELEGRAM APPLICATION
     # =====================================================
 
-    app = (
-
+    application = (
         Application
         .builder()
-
-        .token(
-            BOT_TOKEN
-        )
-
-        .concurrent_updates(
-            16
-        )
-
-        .post_init(
-            start_index_workers
-        )
-
-        .post_shutdown(
-            shutdown_database
-        )
-
+        .token(BOT_TOKEN)
+        .updater(None)
+        .concurrent_updates(16)
         .build()
     )
 
     # =====================================================
-    # /START
+    # HANDLERS
     # =====================================================
 
-    app.add_handler(
-
+    application.add_handler(
         CommandHandler(
             "start",
             start
         )
-
     )
 
-    # =====================================================
-    # ACCESS FLOW
-    # =====================================================
-
-    app.add_handler(
-
+    application.add_handler(
         CallbackQueryHandler(
-
             join_channel,
-
-            pattern=
-            "^join_channel$"
-
+            pattern="^join_channel$"
         )
-
     )
 
-    app.add_handler(
-
+    application.add_handler(
         CallbackQueryHandler(
-
             click_channel,
-
-            pattern=
-            "^click_channel$"
-
+            pattern="^click_channel$"
         )
-
     )
 
-    app.add_handler(
-
+    application.add_handler(
         CallbackQueryHandler(
-
             continue_to_bot,
-
-            pattern=
-            "^continue_to_bot$"
-
+            pattern="^continue_to_bot$"
         )
-
     )
 
-    # =====================================================
-    # DATABASE CHANNEL
-    # =====================================================
-
-    app.add_handler(
-
+    application.add_handler(
         MessageHandler(
-
             filters.UpdateType.CHANNEL_POST
-
             & filters.Chat(
-                chat_id=
-                DATABASE_CHANNEL_ID
+                chat_id=DATABASE_CHANNEL_ID
             )
-
             & (
-
                 filters.VIDEO
-
                 | filters.Document.ALL
-
             ),
-
             index_database_file
-
         )
-
     )
 
-    # =====================================================
-    # USER MOVIE SEARCH
-    # =====================================================
-
-    app.add_handler(
-
+    application.add_handler(
         MessageHandler(
-
             filters.TEXT
             & ~filters.COMMAND,
-
             search
-
         )
-
     )
 
     # =====================================================
-    # START BOT
+    # START PTB
     # =====================================================
 
+    await application.initialize()
+
+    await application.start()
+
+    # =====================================================
+    # START INDEX WORKERS
+    # =====================================================
+
+    await start_index_workers(
+        application
+    )
+
+    # =====================================================
+    # WEBHOOK URL
+    # =====================================================
+
+    webhook_url = (
+        RENDER_EXTERNAL_URL.rstrip("/")
+        + WEBHOOK_PATH
+    )
+
     print(
-        "🤖 Bot is running!"
+        "🔗 Setting Telegram webhook:"
+    )
+
+    print(
+        webhook_url
+    )
+
+    # This replaces any old polling/webhook configuration.
+    await application.bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False
+    )
+
+    print(
+        "✅ Telegram webhook connected"
+    )
+
+    # =====================================================
+    # WEB SERVER
+    # =====================================================
+
+    runner = await start_web_server()
+
+    print(
+        "🤖 Bot is running in WEBHOOK mode!"
     )
 
     print(
@@ -1215,11 +1073,28 @@ def main():
         f"{REQUEST_COOLDOWN} seconds"
     )
 
-    app.run_polling(
-
-        drop_pending_updates=False
-
+    print(
+        "🚫 Telegram polling disabled"
     )
+
+    # Keep application alive
+    try:
+
+        await asyncio.Event().wait()
+
+    finally:
+
+        print(
+            "🛑 Shutting down..."
+        )
+
+        await runner.cleanup()
+
+        await application.stop()
+
+        await application.shutdown()
+
+        await shutdown_database()
 
 
 # =========================================================
@@ -1228,4 +1103,4 @@ def main():
 
 if __name__ == "__main__":
 
-    main()
+    asyncio.run(main())
